@@ -67,7 +67,6 @@ and 压缩 send an ordinary Claude request, as typing it would.
 
 ```bash
 claude plugin validate <mod folder>
-claude plugin test <mod folder>
 ```
 
 ## License

@@ -1,5 +1,3 @@
-import type { EngineInterface } from 'claude-code'
-
 import type { WatchedAgent } from '../types'
 
 // Codex runs started from this chat through Bash (`codex exec`, lane scripts, the companion) are no
@@ -21,9 +19,9 @@ export type CodexRecord = {
   endedAt?: number
 }
 
-const MAX_READ = 4 * 1024 * 1024 - 1 // $.fs.read rejects anything larger
+export const MAX_READ = 4 * 1024 * 1024 - 1 // $.fs.read rejects anything larger
 const STALE_MS = 15 * 60_000 // no write for this long and no end: the run is gone, how it ended unknown
-const DAY_MS = 86_400_000
+export const DAY_MS = 86_400_000
 
 export function mentionsCodex(command: string) {
   return /\bcodex\b|codex_lanes/i.test(command)
@@ -104,59 +102,6 @@ export function owned(cwd: string, root: string | undefined, dirs: readonly stri
   return [...(root ? [slash(root)] : []), ...dirs].some(base => inside(cwd, base))
 }
 
-type Cached = { size: number; mtimeMs: number; record?: CodexRecord }
-const cache = new Map<string, Cached>()
-
-// Every record of the days since the session started (at most a week), each read again only when it
-// changed. Undefined when the records cannot be found at all, so the caller keeps what it had.
-export async function scanCodex($: EngineInterface, since: number, current: number, root: string | undefined, dirs: readonly string[]) {
-  const home = (await $.env.get('CODEX_HOME').catch(() => undefined))
-    || ((await $.env.get('HOME').catch(() => undefined)) || (await $.env.get('USERPROFILE').catch(() => undefined)))?.replace(/[\\/]+$/, '').concat('/.codex')
-  if (!home || !Number.isFinite(since) || !Number.isFinite(current)) return undefined
-  const rows: WatchedAgent[] = []
-  for (let day = Math.max(since, current - 7 * DAY_MS); ; day += DAY_MS) {
-    const date = new Date(Math.min(day, current))
-    const dir = `${home}/sessions/${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`
-    const entries = await $.fs.list(dir).catch(() => undefined)
-    // A day with no Codex run has no folder; a folder there that cannot be listed keeps the old rows.
-    if (entries === undefined) {
-      if (await $.fs.exists(dir).catch(() => true)) return undefined
-      if (day >= current) break
-      continue
-    }
-    for (const entry of entries) {
-      if (entry.kind !== 'file' || !/^rollout-.*\.jsonl$/.test(entry.name) || entry.mtimeMs < since) continue
-      const path = `${dir}/${entry.name}`
-      let hit = cache.get(path)
-      if (!hit || hit.size !== entry.size || hit.mtimeMs !== entry.mtimeMs) {
-        const text = await readRecord($, path, entry.size)
-        // A failed read keeps what the last read of this record gave.
-        if (text !== undefined) {
-          hit = { size: entry.size, mtimeMs: entry.mtimeMs, record: parseCodex(text, entry.size <= MAX_READ) }
-          cache.set(path, hit)
-        } else if (!hit) continue
-      }
-      const r = hit.record
-      if (!r || (r.startedAt ?? 0) < since || !owned(r.cwd, root, dirs) || rows.some(a => a.id === `codex:${r.id}`)) continue
-      rows.push(codexRow(r, entry.mtimeMs, current))
-    }
-    if (day >= current) break
-  }
-  return rows
-}
-
-// A record over the read limit is read as its first and last part (meta and prompt, then the end).
-async function readRecord($: EngineInterface, path: string, size: number) {
-  if (size <= MAX_READ) {
-    const text = await $.fs.read(path).catch(() => undefined)
-    return typeof text === 'string' ? text : undefined
-  }
-  const head = await $.process.run(['head', '-c', '262144', path], { timeoutMs: 5000 }).catch(() => null)
-  const tail = await $.process.run(['tail', '-c', '1048576', path], { timeoutMs: 5000 }).catch(() => null)
-  if (head?.exitCode !== 0 || tail?.exitCode !== 0) return undefined
-  return `${head.stdout}\n${tail.stdout}`
-}
-
 function textOf(item: { content?: unknown; text?: unknown }) {
   if (typeof item.text === 'string') return item.text
   if (!Array.isArray(item.content)) return ''
@@ -184,6 +129,6 @@ function slash(path: string) {
   return path.replace(/\\/g, '/')
 }
 
-function pad(n: number) {
+export function pad(n: number) {
   return String(n).padStart(2, '0')
 }

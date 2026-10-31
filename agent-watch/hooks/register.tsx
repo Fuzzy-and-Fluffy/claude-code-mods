@@ -2,7 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { AgentStatus, BuiltinToolResults, ElementTable, EngineInterface, Register, RenderElement, RenderNode, RenderSurface, Timer } from 'claude-code'
 
 import type { BackgroundSnapshot, TurnTiming, WatchedAgent } from '../types'
-import { commandDirs, mentionsCodex, scanCodex } from './codex'
+import { codexRow, commandDirs, DAY_MS, MAX_READ, mentionsCodex, owned, pad, parseCodex } from './codex'
+import type { CodexRecord } from './codex'
 
 // The phone draws no AbovePrompt band; a Pane is raised on every surface, the mobile app's included.
 const PANE = 'agent-watch'
@@ -48,8 +49,12 @@ async function endMissing($: EngineInterface) {
   const listed = await $.agent.list().catch(() => undefined)
   if (listed === undefined) return
   const current = await now($)
-  await update($, agents, list => list.map((a): WatchedAgent => active(a.status) && !listed.some(info => info.id === a.id)
-    ? { ...a, status: 'completed', endUnknown: true, endedAt: current } : a))
+  const ids = new Set(listed.map(info => info.id))
+  await update($, agents, list => endUnlisted(list, ids, current))
+}
+
+function endUnlisted(list: WatchedAgent[], ids: Set<string>, current: number | undefined): WatchedAgent[] {
+  return list.map(a => active(a.status) && !ids.has(a.id) ? { ...a, status: 'completed', endUnknown: true, endedAt: current } : a)
 }
 
 // Codex's records are read at most every 5 s, at once after a Codex command or a turn's end;
@@ -60,18 +65,23 @@ async function refreshCodex($: EngineInterface, force = false) {
   if (codexScan) return codexScan
   if (!force && current - codexAt < 5000) return codexRows
   codexAt = current
-  codexScan = (async () => {
-    since ??= await $.session.usage().then(u => u.startedAt).catch(() => undefined)
-    if (since === undefined) return codexRows
-    const root = await $.session.root().catch(() => undefined)
-    const dirs = await read($, codexDirs).catch(() => [] as string[])
-    const rows = await scanCodex($, since, current, root, dirs).catch(() => undefined)
-    if (rows === undefined) return codexRows
-    await update($, codex, () => rows).catch(() => {})
-    codexRows = rows
-    return rows
-  })().finally(() => { codexScan = undefined })
+  codexScan = scanAndStore($, current).finally(() => { codexScan = undefined })
   return codexScan
+}
+
+async function scanAndStore($: EngineInterface, current: number) {
+  if (since === undefined) {
+    const usage = await $.session.usage().catch(() => undefined)
+    since = usage?.startedAt
+  }
+  if (since === undefined) return codexRows
+  const root = await $.session.root().catch(() => undefined)
+  const dirs = await read($, codexDirs).catch(() => [] as string[])
+  const rows = await scanCodex($, since, current, root, dirs).catch(() => undefined)
+  if (rows === undefined) return codexRows
+  await update($, codex, () => rows).catch(() => {})
+  codexRows = rows
+  return rows
 }
 
 // Folders named by a Bash command that mentions Codex; a run in one of them is this chat's.
@@ -81,6 +91,59 @@ async function noteCodexDirs($: EngineInterface, command: string) {
   if (current !== undefined) codexExpectUntil = current + 60_000
   const found = commandDirs(command, home)
   if (found.length) await update($, codexDirs, old => [...new Set([...old, ...found])].slice(-100)).catch(() => {})
+}
+
+type Cached = { size: number; mtimeMs: number; record?: CodexRecord }
+const cache = new Map<string, Cached>()
+
+// Every record of the days since the session started (at most a week), each read again only when it
+// changed. Undefined when the records cannot be found at all, so the caller keeps what it had.
+async function scanCodex($: EngineInterface, since: number, current: number, root: string | undefined, dirs: readonly string[]) {
+  const home = (await $.env.get('CODEX_HOME').catch(() => undefined))
+    || ((await $.env.get('HOME').catch(() => undefined)) || (await $.env.get('USERPROFILE').catch(() => undefined)))?.replace(/[\\/]+$/, '').concat('/.codex')
+  if (!home || !Number.isFinite(since) || !Number.isFinite(current)) return undefined
+  const rows: WatchedAgent[] = []
+  for (let day = Math.max(since, current - 7 * DAY_MS); ; day += DAY_MS) {
+    const date = new Date(Math.min(day, current))
+    const dir = `${home}/sessions/${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`
+    const entries = await $.fs.list(dir).catch(() => undefined)
+    // A day with no Codex run has no folder; a folder there that cannot be listed keeps the old rows.
+    if (entries === undefined) {
+      if (await $.fs.exists(dir).catch(() => true)) return undefined
+      if (day >= current) break
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.kind !== 'file' || !/^rollout-.*\.jsonl$/.test(entry.name) || entry.mtimeMs < since) continue
+      const path = `${dir}/${entry.name}`
+      let hit = cache.get(path)
+      if (!hit || hit.size !== entry.size || hit.mtimeMs !== entry.mtimeMs) {
+        const text = await readRecord($, path, entry.size)
+        // A failed read keeps what the last read of this record gave.
+        if (text !== undefined) {
+          hit = { size: entry.size, mtimeMs: entry.mtimeMs, record: parseCodex(text, entry.size <= MAX_READ) }
+          cache.set(path, hit)
+        } else if (!hit) continue
+      }
+      const r = hit.record
+      if (!r || (r.startedAt ?? 0) < since || !owned(r.cwd, root, dirs) || rows.some(a => a.id === `codex:${r.id}`)) continue
+      rows.push(codexRow(r, entry.mtimeMs, current))
+    }
+    if (day >= current) break
+  }
+  return rows
+}
+
+// A record over the read limit is read as its first and last part (meta and prompt, then the end).
+async function readRecord($: EngineInterface, path: string, size: number) {
+  if (size <= MAX_READ) {
+    const text = await $.fs.read(path).catch(() => undefined)
+    return typeof text === 'string' ? text : undefined
+  }
+  const head = await $.process.run(['head', '-c', '262144', path], { timeoutMs: 5000 }).catch(() => null)
+  const tail = await $.process.run(['tail', '-c', '1048576', path], { timeoutMs: 5000 }).catch(() => null)
+  if (head?.exitCode !== 0 || tail?.exitCode !== 0) return undefined
+  return `${head.stdout}\n${tail.stdout}`
 }
 
 export const register: Register = on => {
