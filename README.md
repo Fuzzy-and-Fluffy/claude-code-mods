@@ -15,6 +15,20 @@ Claude Code 的三个小 mod：子助手面板、一排快捷按钮、用量显�
 
 Mods run in the Claude Code CLI and in the Code tab of the Claude desktop app.
 
+All three in one line (Claude Code 2.1.292 or later; macOS, Linux or WSL):
+
+```bash
+for m in agent-watch session-toolbar session-usage; do claude plugin install $m --marketplace Fuzzy-and-Fluffy/claude-code-mods || break; done
+```
+
+Windows PowerShell:
+
+```powershell
+foreach ($m in 'agent-watch','session-toolbar','session-usage') { claude plugin install $m --marketplace Fuzzy-and-Fluffy/claude-code-mods; if ($LASTEXITCODE) { break } }
+```
+
+Or one at a time:
+
 ```bash
 claude plugin marketplace add Fuzzy-and-Fluffy/claude-code-mods
 claude plugin install agent-watch@wondering-mods
