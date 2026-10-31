@@ -37,7 +37,7 @@ test('a window missing from one reading keeps its base for the period', () => {
   expect(reset.five_hour).toEqual({ at: 4000, pct: 2, last: 2, resetsAt: '2026-10-25T15:00:00Z' })
 })
 
-test('the footer label leads with the context fill, and no five-hour window', async ($, on) => {
+test('the footer label shows the week, then the context fill, and no five-hour window', async ($, on) => {
   const usage = {
     startedAt: 0,
     context: { window: 1_000_000, breakdown: { rawMaxTokens: 1_000_000, totalTokens: 420_000, percentage: 42, categories: [], isAutoCompactEnabled: false } },
@@ -52,8 +52,8 @@ test('the footer label leads with the context fill, and no five-hour window', as
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const footer = await $.ui.mount({ plugin: 'session-usage', component: 'SessionMode', requestId: 'mode', props: { modes: [] }, surface: 'desktop' })
-  for (let i = 0; i < 20 && (await footer.find({ type: 'Button', key: 'usage' }))?.text?.startsWith('上下文 —'); i++) await footer.redraw()
-  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('上下文 42% | 7d 80% | 缓存 —')
+  for (let i = 0; i < 20 && (await footer.find({ type: 'Button', key: 'usage' }))?.text?.includes('上下文 —'); i++) await footer.redraw()
+  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('7d 80% | 上下文 42% | 缓存 —')
 })
 
 test('the footer label carries no warning marks, and times read m/h/d', async ($, on) => {
@@ -75,7 +75,7 @@ test('the footer label carries no warning marks, and times read m/h/d', async ($
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const footer = await $.ui.mount({ plugin: 'session-usage', component: 'SessionMode', requestId: 'mode', props: { modes: [] }, surface: 'desktop' })
-  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('上下文 — | 7d 80% | 缓存 —')
+  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('7d 80% | 上下文 — | 缓存 —')
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await footer.press({ key: 'usage' })
   expect(await band.find({ type: 'Text', text: '9m 后重置' })).toBeDefined()

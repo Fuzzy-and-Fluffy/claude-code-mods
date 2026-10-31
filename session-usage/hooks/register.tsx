@@ -1,4 +1,4 @@
-// Session usage: a small "上下文 42% | 7d 71% | 缓存 52m" label in the prompt footer. A click on it opens the
+// Session usage: a small "7d 71% | 上下文 42% | 缓存 52m" label in the prompt footer. A click on it opens the
 //   details above the prompt (usage windows, session cost, prompt cache, context fill); another
 //   click folds them again. Every session starts folded. A toast warns once per window past WARN_AT.
 //   The cache countdown is estimated: the API keeps the main conversation's cache for one TTL
@@ -18,7 +18,7 @@ const TOP_SLICES = 4
 const EXPIRY_WARN_MS = 5 * 60_000 // how long before the cache expires the toast warns
 const PACE_MIN_MS = 10 * 60_000 // the shortest stretch a pace estimate is drawn from
 const LABEL_CELLS = 8 // the details card's label column, in character cells
-const VALUE_CELLS = 9 // its number column, right-aligned; fits $1000.00
+const VALUE_CELLS = 9 // its number column, left-aligned like the others so each column starts on one line; fits $1000.00
 const WINDOW_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: '花费上限' }
 const ORDER = ['five_hour', 'seven_day', 'spend_limit']
 const SLICE_NAMES: Record<string, string> = {
@@ -109,8 +109,8 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     // One short plain label: the footer slot is narrow, and separate pills cut it off sooner.
     // A click opens the details above the prompt; another click folds them.
-    // Context leads: plans no longer have a five-hour window (2026-11-01); the details still list any window reported.
-    const label = [`上下文 ${pct(reading?.percent)}`, `7d ${pct(windowPct(snap, 'seven_day'))}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
+    // Plans no longer have a five-hour window (2026-11-01): the week first, then context; the details still list any window reported.
+    const label = [`7d ${pct(windowPct(snap, 'seven_day'))}`, `上下文 ${pct(reading?.percent)}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
     return (
       <Box flexDirection="row" gap="md">
         {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}
@@ -142,10 +142,10 @@ export const register: Register = on => {
                 <Box width={LABEL_CELLS} flexShrink={0}>
                   <Text dimColor>{row.label}</Text>
                 </Box>
-                <Box width={VALUE_CELLS} flexShrink={0} justifyContent="flex-end">
+                <Box width={VALUE_CELLS} flexShrink={0}>
                   <Text wrap="truncate">{row.value}</Text>
                 </Box>
-                <Box flexShrink={1} marginLeft={2}>
+                <Box flexShrink={1}>
                   <Text dimColor wrap="truncate">
                     {row.note}
                   </Text>

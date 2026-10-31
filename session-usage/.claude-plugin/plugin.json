@@ -1,6 +1,6 @@
 {
   "name": "session-usage",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Plan usage, prompt cache and context in the prompt footer; a click opens the details above the prompt.",
   "author": {
     "name": "Momo Wonders",
