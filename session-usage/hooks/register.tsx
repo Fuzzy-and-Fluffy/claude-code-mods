@@ -1,4 +1,4 @@
-// Session usage: a small "7d 71% | 上下文 42% | 缓存 52m" label in the prompt footer. A click on it opens the
+// Session usage: a small "上下文 42% | 缓存 52m" label in the prompt footer. A click on it opens the
 //   details above the prompt (usage windows, session cost, prompt cache, context fill); another
 //   click folds them again. Every session starts folded. A toast warns once per window past WARN_AT.
 //   The cache countdown is estimated: the API keeps the main conversation's cache for one TTL
@@ -17,9 +17,10 @@ const WARN_AT = 90
 const TOP_SLICES = 4
 const EXPIRY_WARN_MS = 5 * 60_000 // how long before the cache expires the toast warns
 const PACE_MIN_MS = 10 * 60_000 // the shortest stretch a pace estimate is drawn from
-const LABEL_CELLS = 8 // the details card's label column, in character cells
+const LABEL_GAP = 2 // cells between the longest label and the number column
 const VALUE_CELLS = 9 // its number column, left-aligned like the others so each column starts on one line; fits $1000.00
-const WINDOW_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: '花费上限' }
+// 周额度 rather than 7d: a digit's own side space set it off from the Chinese labels below it.
+const WINDOW_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '周额度', spend_limit: '花费上限' }
 const ORDER = ['five_hour', 'seven_day', 'spend_limit']
 const SLICE_NAMES: Record<string, string> = {
   'system prompt': '系统提示词',
@@ -109,8 +110,9 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     // One short plain label: the footer slot is narrow, and separate pills cut it off sooner.
     // A click opens the details above the prompt; another click folds them.
-    // Plans no longer have a five-hour window (2026-11-01): the week first, then context; the details still list any window reported.
-    const label = [`7d ${pct(windowPct(snap, 'seven_day'))}`, `上下文 ${pct(reading?.percent)}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
+    // Context and cache only: plans lost the five-hour window (2026-11-01) and the app's own ring shows the
+    // weekly one; a click opens every window in the details.
+    const label = [`上下文 ${pct(reading?.percent)}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
     return (
       <Box flexDirection="row" gap="md">
         {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}
@@ -130,7 +132,9 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     // The details card, as a list of one so the tree keeps the array shape the desktop draws.
-    const cards = [detailRows(snap, c, reading, now, await read($, pace))]
+    const rows = detailRows(snap, c, reading, now, await read($, pace))
+    const cards = [rows]
+    const labelCells = Math.max(...rows.map(r => cells(r.label))) + LABEL_GAP // fits 花费上限 as well as 周额度
     const mine = (
       <Box key="momo-band-3-usage" flexDirection="column">
         {cards.map(rows => (
@@ -139,7 +143,7 @@ export const register: Register = on => {
               <Box key={row.label} flexDirection="row">
                 {/* One cell in, so the labels line up with button text drawn above them. */}
                 <Box width={1} flexShrink={0} />
-                <Box width={LABEL_CELLS} flexShrink={0}>
+                <Box width={labelCells} flexShrink={0}>
                   <Text dimColor>{row.label}</Text>
                 </Box>
                 <Box width={VALUE_CELLS} flexShrink={0}>
@@ -205,7 +209,7 @@ async function warn($: EngineInterface, windows: UsageWindow[]) {
     if (last !== undefined && resetMs <= last + 30 * 60_000) continue // a reset time that moved on by more than half an hour is a new period
     fresh[w.kind] = resetMs
     const when = resetMs > 0 ? `，${countdown(resetMs - now)} 后重置` : ''
-    $.ui.toast(`${windowName(w.kind)} 额度已用 ${Math.round(w.percentUsed)}%${when}`)
+    $.ui.toast(`${quotaName(w.kind)}已用 ${Math.round(w.percentUsed)}%${when}`)
   }
   if (Object.keys(fresh).length > 0) await update($, warned, old => ({ ...old, ...fresh }))
 }
@@ -339,8 +343,19 @@ function pct(n: number | undefined) {
   return n === undefined ? '—' : `${Math.round(n)}%`
 }
 
+// Character cells a label takes: CJK and other wide characters take two.
+export function cells(text: string) {
+  return [...text].reduce((n, ch) => n + (/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1), 0)
+}
+
 function windowName(kind: string) {
   return WINDOW_NAMES[kind] ?? kind.replace(/_/g, ' ')
+}
+
+// The window's name as a toast says it: 周额度, 5h 额度, 花费上限.
+function quotaName(kind: string) {
+  const name = windowName(kind)
+  return /(额度|上限)$/.test(name) ? name : `${name} 额度`
 }
 
 function rank(kind: string) {

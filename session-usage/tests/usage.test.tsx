@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { nextBases, paceOut } from '../hooks/register'
+import { cells, nextBases, paceOut } from '../hooks/register'
 
 const BAND = {
   plugin: 'session-usage',
@@ -37,7 +37,7 @@ test('a window missing from one reading keeps its base for the period', () => {
   expect(reset.five_hour).toEqual({ at: 4000, pct: 2, last: 2, resetsAt: '2026-10-25T15:00:00Z' })
 })
 
-test('the footer label shows the week, then the context fill, and no five-hour window', async ($, on) => {
+test('the footer label shows only the context fill and the cache', async ($, on) => {
   const usage = {
     startedAt: 0,
     context: { window: 1_000_000, breakdown: { rawMaxTokens: 1_000_000, totalTokens: 420_000, percentage: 42, categories: [], isAutoCompactEnabled: false } },
@@ -53,7 +53,29 @@ test('the footer label shows the week, then the context fill, and no five-hour w
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const footer = await $.ui.mount({ plugin: 'session-usage', component: 'SessionMode', requestId: 'mode', props: { modes: [] }, surface: 'desktop' })
   for (let i = 0; i < 20 && (await footer.find({ type: 'Button', key: 'usage' }))?.text?.includes('上下文 —'); i++) await footer.redraw()
-  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('7d 80% | 上下文 42% | 缓存 —')
+  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('上下文 42% | 缓存 —')
+})
+
+test('a label takes two cells per Chinese character', () => {
+  expect(cells('周额度')).toBe(6)
+  expect(cells('花费上限')).toBe(8)
+  expect(cells('5h')).toBe(2)
+})
+
+test('the warning names the weekly window as 周额度', async ($, on) => {
+  const toasts: string[] = []
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1_000_000 }, rateLimits: [{ kind: 'seven_day', percentUsed: 93, resetsAt: '2026-10-26T12:00:00Z' }] } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('clock.now', () => ({ value: Date.parse('2026-10-25T07:00:00Z') }))
+  on('clock.every', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.render', () => ({ type: 'engine', ref: 0 }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(toasts.join('\n')).toMatch(/^周额度已用 93%，1d 5h 后重置$/m)
 })
 
 test('the footer label carries no warning marks, and times read m/h/d', async ($, on) => {
@@ -75,10 +97,12 @@ test('the footer label carries no warning marks, and times read m/h/d', async ($
   on('ui.render', () => ({ type: 'engine', ref: 0 }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const footer = await $.ui.mount({ plugin: 'session-usage', component: 'SessionMode', requestId: 'mode', props: { modes: [] }, surface: 'desktop' })
-  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('7d 80% | 上下文 — | 缓存 —')
+  expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('上下文 — | 缓存 —')
   const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await footer.press({ key: 'usage' })
   expect(await band.find({ type: 'Text', text: '9m 后重置' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '周额度' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '花费上限' })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /^1d 5h 后重置/ })).toBeDefined()
 })
 
@@ -108,7 +132,7 @@ async function cacheLabel($: Engine) {
   const footer = await $.ui.mount({ plugin: 'session-usage', component: 'SessionMode', requestId: 'mode', props: { modes: [] }, surface: 'desktop' })
   const text = (await footer.find({ type: 'Button', key: 'usage' }))?.text
   await footer.unmount()
-  return text?.split(' | ').pop()
+  return text?.match(/缓存 \S+$/)?.[0]
 }
 
 test('each main-loop step of a long turn renews the cache countdown; a sub-agent step does not', async ($, on) => {
