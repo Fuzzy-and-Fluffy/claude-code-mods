@@ -1,0 +1,25 @@
+{
+  "name": "wondering-mods",
+  "owner": {
+    "name": "Momo Wonders",
+    "email": "hello@wondering.works"
+  },
+  "description": "Three Claude Code mods: a sub-agent pane that also shows Codex runs, a quick-button toolbar, and a usage footer. Chinese UI.",
+  "plugins": [
+    {
+      "name": "agent-watch",
+      "source": "./agent-watch",
+      "description": "Sub-agent status, activity and elapsed time above the prompt, Codex runs included."
+    },
+    {
+      "name": "session-toolbar",
+      "source": "./session-toolbar",
+      "description": "Quick buttons above the prompt: 进度, 交接, 压缩, 撤回, 旁问, 收尾."
+    },
+    {
+      "name": "session-usage",
+      "source": "./session-usage",
+      "description": "Plan usage, prompt cache and context in the prompt footer, with details on click."
+    }
+  ]
+}

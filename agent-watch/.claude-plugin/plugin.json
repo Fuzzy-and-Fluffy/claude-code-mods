@@ -1,0 +1,13 @@
+{
+  "name": "agent-watch",
+  "version": "0.6.1",
+  "description": "Sub-agent status, activity and elapsed time above the prompt.",
+  "author": {
+    "name": "Momo Wonders",
+    "email": "hello@wondering.works"
+  },
+  "homepage": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
+  "repository": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

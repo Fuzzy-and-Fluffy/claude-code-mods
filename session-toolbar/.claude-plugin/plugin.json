@@ -1,0 +1,13 @@
+{
+  "name": "session-toolbar",
+  "version": "0.5.11",
+  "description": "A row of quick buttons above the prompt: 进度, 交接 (handoff without a model call), 压缩, 撤回, 旁问 and 收尾 (closeout check).",
+  "author": {
+    "name": "Momo Wonders",
+    "email": "hello@wondering.works"
+  },
+  "homepage": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
+  "repository": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

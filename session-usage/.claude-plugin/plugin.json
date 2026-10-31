@@ -1,0 +1,13 @@
+{
+  "name": "session-usage",
+  "version": "0.4.2",
+  "description": "Plan usage, prompt cache and context in the prompt footer; a click opens the details above the prompt.",
+  "author": {
+    "name": "Momo Wonders",
+    "email": "hello@wondering.works"
+  },
+  "homepage": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
+  "repository": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
