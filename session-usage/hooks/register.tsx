@@ -1,4 +1,4 @@
-// Session usage: a small "5h 14% | 7d 71% | 缓存 52m" label in the prompt footer. A click on it opens the
+// Session usage: a small "上下文 42% | 7d 71% | 缓存 52m" label in the prompt footer. A click on it opens the
 //   details above the prompt (usage windows, session cost, prompt cache, context fill); another
 //   click folds them again. Every session starts folded. A toast warns once per window past WARN_AT.
 //   The cache countdown is estimated: the API keeps the main conversation's cache for one TTL
@@ -109,7 +109,8 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     // One short plain label: the footer slot is narrow, and separate pills cut it off sooner.
     // A click opens the details above the prompt; another click folds them.
-    const label = [`5h ${pct(windowPct(snap, 'five_hour'))}`, `7d ${pct(windowPct(snap, 'seven_day'))}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
+    // Context leads: plans no longer have a five-hour window (2026-11-01); the details still list any window reported.
+    const label = [`上下文 ${pct(reading?.percent)}`, `7d ${pct(windowPct(snap, 'seven_day'))}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
     return (
       <Box flexDirection="row" gap="md">
         {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}

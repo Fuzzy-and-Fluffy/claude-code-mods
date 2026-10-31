@@ -40,7 +40,7 @@ for (const beneath of ['engine node', 'another band'] as const) {
 
     const footer = await $.ui.mount({ ...FOOTER, surface: 'desktop' })
     const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
-    expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('5h 15% | 7d 71% | 缓存 —')
+    expect((await footer.find({ type: 'Button', key: 'usage' }))?.text).toBe('上下文 — | 7d 71% | 缓存 —')
     expect(await band.find({ type: 'Text', text: '5h' })).toBeUndefined()
 
     await footer.press({ key: 'usage' })
