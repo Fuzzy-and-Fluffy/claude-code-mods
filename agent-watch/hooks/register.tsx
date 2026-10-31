@@ -24,7 +24,7 @@ let since: number | undefined
 // A detached Codex command writes its record a moment after Bash returns: look again for a minute.
 let codexExpectUntil = -Infinity
 
-async function now($: EngineInterface) {
+async function clockNow($: EngineInterface) {
   try {
     lastNow = await $.clock.now()
   } catch {}
@@ -48,7 +48,7 @@ async function toggleDone($: EngineInterface) {
 async function endMissing($: EngineInterface) {
   const listed = await $.agent.list().catch(() => undefined)
   if (listed === undefined) return
-  const current = await now($)
+  const current = await clockNow($)
   const ids = new Set(listed.map(info => info.id))
   await update($, agents, list => endUnlisted(list, ids, current))
 }
@@ -60,7 +60,7 @@ function endUnlisted(list: WatchedAgent[], ids: Set<string>, current: number | u
 // Codex's records are read at most every 5 s, at once after a Codex command or a turn's end;
 // renders only read the atom, since a render cannot write one.
 async function refreshCodex($: EngineInterface, force = false) {
-  const current = await now($)
+  const current = await clockNow($)
   if (current === undefined) return codexRows
   if (codexScan) return codexScan
   if (!force && current - codexAt < 5000) return codexRows
@@ -87,7 +87,7 @@ async function scanAndStore($: EngineInterface, current: number) {
 // Folders named by a Bash command that mentions Codex; a run in one of them is this chat's.
 async function noteCodexDirs($: EngineInterface, command: string) {
   const home = (await $.env.get('HOME').catch(() => undefined)) || (await $.env.get('USERPROFILE').catch(() => undefined))
-  const current = await now($)
+  const current = await clockNow($)
   if (current !== undefined) codexExpectUntil = current + 60_000
   const found = commandDirs(command, home)
   if (found.length) await update($, codexDirs, old => [...new Set([...old, ...found])].slice(-100)).catch(() => {})
@@ -172,7 +172,7 @@ export const register: Register = on => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    const startedAt = await now($)
+    const startedAt = await clockNow($)
     const r = await next(e)
     if (!r.agentId || e.workflow) return r
     const id = r.agentId
@@ -222,7 +222,7 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     // The turn's id is kept with its times, so a reload mid-turn does not restart the count.
     if (!e.agentId && (await read($, turn).catch(() => undefined))?.turnId !== e.turnId) {
-      const startedAt = await now($)
+      const startedAt = await clockNow($)
       await update($, turn, () => ({ turnId: e.turnId, startedAt })).catch(() => {})
       keepTicking($, ended, await read($, agents).catch(() => []), true)
     }
@@ -243,7 +243,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    const endedAt = await now($)
+    const endedAt = await clockNow($)
     if (!e.agentId) {
       // A turn whose start was missed still ends the stored one, so no stale 正在工作 is left open.
       await update($, turn, old => (old.turnId === e.turnId ? { ...old, endedAt } : old.endedAt === undefined ? { turnId: e.turnId, endedAt } : old)).catch(() => {})
@@ -267,7 +267,7 @@ export const register: Register = on => {
     // Read after the listing, so a render reaches agent.list as soon as before.
     const list = [...await refresh($, ended, false).catch(() => []), ...await read($, codex).catch(() => [] as WatchedAgent[])]
     const open = (await $.ui.panes().catch(() => [])).some(pane => pane.id === PANE)
-    const current = await now($)
+    const current = await clockNow($)
     keepTicking($, ended, list, e.props.isWorking || working(timing), waiting(bg, list))
     if (e.props.hasSurvey) return rest
     let elements
@@ -293,7 +293,7 @@ export const register: Register = on => {
     const open = await read($, doneOpen).catch(() => false)
     // Read after the listing, so a render reaches agent.list as soon as before.
     const list = [...await refresh($, ended, false).catch(() => []), ...await read($, codex).catch(() => [] as WatchedAgent[])]
-    const current = await now($)
+    const current = await clockNow($)
     const isWorking = working(timing)
     keepTicking($, ended, list, isWorking, waiting(bg, list))
     let elements
@@ -424,7 +424,7 @@ function rowText(a: WatchedAgent, current: number | undefined) {
 
 async function refresh($: EngineInterface, ended: Map<string, number>, persist = true) {
   const listed = await $.agent.list().catch(() => [])
-  const current = await now($)
+  const current = await clockNow($)
   const merge = (old: WatchedAgent[]) => {
     const list = [...old]
     for (const info of listed) {
