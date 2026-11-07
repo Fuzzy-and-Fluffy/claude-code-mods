@@ -111,21 +111,23 @@ export function redact(text: string): string {
 //   generic long-run rule is left out there because it would hide ordinary paths.
 export function redactShapes(text: string): string {
   return text
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, HIDDEN)
+    // The unprefixed shapes start only where a word starts, so the tail of an ordinary word stays:
+    //   disk-cleanup-tool, risk-assessment, task-management, laughs_and_cries.
+    .replace(/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8,}/g, HIDDEN)
     .replace(/github_pat_[A-Za-z0-9_]{8,}/g, HIDDEN)
     // Prefixed tokens of common services: GitLab, Google, Hugging Face, npm, PyPI, Stripe, Shopify,
     //   SendGrid, DigitalOcean, Slack app tokens, OpenAI/Anthropic project keys are caught by sk- above.
     .replace(/\b(?:glpat-|glrt-|gldt-|AIza|ya29\.|hf_|npm_|pypi-|(?:sk|rk|pk)_(?:live|test)_|shp(?:at|ss|ca|pa)_|SG\.|dop_v1_|xapp-)[A-Za-z0-9._-]{8,}/g, HIDDEN)
     .replace(/\b(?:ASIA|AGPA|AIDA|AROA)[0-9A-Z]{16}\b/g, HIDDEN)
-    .replace(/gh[pousr]_[A-Za-z0-9]{8,}/g, HIDDEN)
+    .replace(/(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{8,}/g, HIDDEN)
     .replace(/AKIA[0-9A-Z]{16}/g, HIDDEN)
-    .replace(/xox[A-Za-z]-[A-Za-z0-9-]{8,}/g, HIDDEN)
+    .replace(/(?<![A-Za-z0-9])xox[A-Za-z]-[A-Za-z0-9-]{8,}/g, HIDDEN)
     .replace(/eyJ[\w-]+\.[\w-]+\.[\w-]+/g, HIDDEN)
     .replace(/(:\/\/)[^\s/@]+@/g, `$1${HIDDEN}@`)
     .replace(/(authorization["']?[ \t]*[=:][ \t]*)(?:"[^"]*"|'[^']*'|[^"'\n]*)/gi, `$1${HIDDEN}`)
     .replace(/bearer\s+[^\s"']+/gi, HIDDEN)
     .replace(/((?:^|\s)(?:-u|--user)(?:=|[ \t]+))(?:"[^"]*"|'[^']*'|\S+)/g, `$1${HIDDEN}`)
-    .replace(/([A-Za-z0-9_]*(?:pass|secret|token|api_key|apikey|access_key|private_key|credential|auth)[A-Za-z0-9_]*["']?[ \t]*[=:][ \t]*)(?:"[^"]*"|'[^']*'|[^\s"']+)/gi, `$1${HIDDEN}`)
+    .replace(/([A-Za-z0-9_]*(?:pass|secret|token|api[_-]?key|access_key|private_key|credential|auth)[A-Za-z0-9_]*["']?[ \t]*[=:][ \t]*)(?:"[^"]*"|'[^']*'|[^\s"']+)/gi, `$1${HIDDEN}`)
 }
 
 // One redacted, clipped line: a label as a list item shows it.

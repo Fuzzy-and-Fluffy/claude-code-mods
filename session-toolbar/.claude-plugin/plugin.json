@@ -1,6 +1,6 @@
 {
   "name": "session-toolbar",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "description": "A row of quick buttons above the prompt: 进度, 交接 (handoff without a model call), 压缩, 撤回, 旁问 and 收尾 (closeout check).",
   "author": {
     "name": "Momo Wonders",
