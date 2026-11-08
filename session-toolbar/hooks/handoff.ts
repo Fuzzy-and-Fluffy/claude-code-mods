@@ -4,13 +4,16 @@
 //   Pure functions: the register file gathers the inputs through $ and writes the results.
 import type { SessionMessage } from 'claude-code'
 
+import { t } from './i18n'
+import type { Lang } from './i18n'
+
 export type HandoffInput = {
   messages: readonly SessionMessage[]
   cwd: string
   notePath: string
   transcriptPath?: string // absent when the transcript file could not be found
-  git?: { status: string; lastCommit: string } // absent outside a git repository
-  ledger?: { path: string; text: string }
+  git?: { status: string; lastCommit: string } // absent when Git evidence was not read
+  ledgers?: { path: string; text: string }[]
   now: number
 }
 
@@ -41,11 +44,11 @@ export function userWords(text: string): string {
 }
 
 // Keeps the head and the tail of a long text, as a reader skims it.
-export function clip(text: string, limit: number): string {
-  const t = text.trim()
-  if (t.length <= limit) return t
+export function clip(text: string, limit: number, lang: Lang = 'zh'): string {
+  const s = text.trim()
+  if (s.length <= limit) return s
   const head = Math.floor(limit * 0.65)
-  return `${t.slice(0, head)}\n……（中间省略 ${t.length - limit} 字）……\n${t.slice(-(limit - head))}`
+  return `${s.slice(0, head)}\n${t(lang).handoff.omitted(s.length - limit)}\n${s.slice(-(limit - head))}`
 }
 
 // The task list as the last update_plan call and the steps after it left it.
@@ -97,19 +100,19 @@ export function editedFiles(messages: readonly SessionMessage[]): string[] {
   return seen.slice(-FILES_LIMIT)
 }
 
-const HIDDEN = '[已隐去]'
-
 // Hides what looks like a secret in free text before it goes into a note that gets pasted into
 //   a new session: the known shapes, then a generic rule for long random-looking runs.
-export function redact(text: string): string {
-  return redactShapes(text)
+export function redact(text: string, lang: Lang = 'zh'): string {
+  const HIDDEN = t(lang).handoff.hidden
+  return redactShapes(text, lang)
     .replace(/[A-Za-z0-9+/=_-]{20,}/g, run => (/\d/.test(run) && /[A-Za-z]/.test(run) && /[A-Z+/=]/.test(run) ? HIDDEN : run))
 }
 
 // The known secret shapes only. It runs once more over the whole finished note, kickoff and
 //   clipboard text, so a field that skipped redact() (a path, a folder) still loses them; the
 //   generic long-run rule is left out there because it would hide ordinary paths.
-export function redactShapes(text: string): string {
+export function redactShapes(text: string, lang: Lang = 'zh'): string {
+  const HIDDEN = t(lang).handoff.hidden
   return text
     // The unprefixed shapes start only where a word starts, so the tail of an ordinary word stays:
     //   disk-cleanup-tool, risk-assessment, task-management, laughs_and_cries.
@@ -131,14 +134,13 @@ export function redactShapes(text: string): string {
 }
 
 // One redacted, clipped line: a label as a list item shows it.
-function oneLine(text: string, limit: number): string {
-  return clip(redact(text.replace(/\s*\n\s*/g, ' ')), limit).replace(/\s*\n\s*/g, ' ')
+function oneLine(text: string, limit: number, lang: Lang): string {
+  return clip(redact(text.replace(/\s*\n\s*/g, ' '), lang), limit, lang).replace(/\s*\n\s*/g, ' ')
 }
 
 // redact() is only the second layer: a pattern list can always miss a secret. What a note writes
 //   from a command is dropped whole when it looks like it could hold one.
 const SUSPICIOUS = /key|token|secret|pass|auth|bearer|credential|cookie|session|@|\b[A-Za-z0-9+/=_-]{20,}\b/i
-const COMMAND_WITHHELD = '（命令已省略）'
 
 const CD_FIRST = /^cd[ \t]+[A-Za-z0-9_./~-]+[ \t]*&&[ \t]*/
 const CHECK = /^(?:npx(?:[ \t]+-y)?(?:[ \t]+(?:-p|--package)[ \t]+[\w@./-]+)?[ \t]+)?(claude[ \t]+plugin[ \t]+(?:test|validate)|tsc|pytest|(?:npm|pnpm|yarn|bun)[ \t]+(?:run[ \t]+)?(?:test|typecheck|lint|validate)|vitest|jest|cargo[ \t]+(?:test|check)|go[ \t]+test)((?:[ \t]+[A-Za-z0-9_./:=,@+-]+)*)$/
@@ -178,21 +180,22 @@ function isPureCheck(command: string): boolean {
 }
 
 // What one call proves, from the stored record alone and never from its words, which name test files,
-//   job ids and anything else. An errored call did not pass (it failed, or was interrupted): 未通过.
+//   job ids and anything else. An errored call did not pass (it failed, or was interrupted).
 //   A pass needs Bash's own record saying it ran to the end in the foreground. Anything else (in
 //   flight, backgrounded, timed out, or a record the session did not store) proves nothing and is left out.
-function outcome(use: SessionMessage['toolUses'][number]): '通过' | '未通过' | undefined {
-  if (use.isError) return '未通过'
+function outcome(use: SessionMessage['toolUses'][number]): 'passed' | 'failed' | undefined {
+  if (use.isError) return 'failed'
   if (typeof use.result !== 'object' || use.result === null) return undefined
   const r = use.result as Record<string, unknown>
   const finished = r.interrupted === false && r.backgroundTaskId === undefined && r.backgroundedByUser !== true &&
     r.backgroundedByTurnAbort !== true && r.backgroundedToDeliverMessage !== true && r.timedOutAfterMs === undefined
-  return finished ? '通过' : undefined
+  return finished ? 'passed' : undefined
 }
 
 // The last run of each pure check command as list lines, oldest run first. Nothing says whether a
 //   run is still current: the note tells the reader to run the checks again.
-export function checkRuns(messages: readonly SessionMessage[]): string[] {
+export function checkRuns(messages: readonly SessionMessage[], lang: Lang = 'zh'): string[] {
+  const T = t(lang)
   const last = new Map<string, string>()
   for (const m of messages) {
     for (const use of m.toolUses) {
@@ -200,73 +203,72 @@ export function checkRuns(messages: readonly SessionMessage[]): string[] {
       const result = isPureCheck(command) ? outcome(use) : undefined
       if (result === undefined) continue
       last.delete(command)
-      last.set(command, `- ${SUSPICIOUS.test(command) ? COMMAND_WITHHELD : `\`${oneLine(command, COMMAND_LIMIT)}\``}：${result}`)
+      last.set(command, `- ${SUSPICIOUS.test(command) ? T.handoff.withheld : `\`${oneLine(command, COMMAND_LIMIT, lang)}\``}${T.colon}${T.handoff[result]}`)
     }
   }
   return [...last.values()].slice(-CHECKS_KEPT)
 }
 
-export function buildHandoff(input: HandoffInput): { note: string; kickoff: string } {
+export function buildHandoff(input: HandoffInput, lang: Lang = 'zh'): { note: string; kickoff: string } {
+  const H = t(lang).handoff
   const users = input.messages.filter(m => m.role === 'user').map(m => userWords(m.text)).filter(t => t !== '')
   const lastReport = [...input.messages].reverse().find(m => m.role === 'assistant' && m.text.trim() !== '')
   const plan = planOf(input.messages)
   const files = editedFiles(input.messages)
-  const checks = checkRuns(input.messages)
+  const checks = checkRuns(input.messages, lang)
   const mark: Record<string, string> = { completed: '[x]', in_progress: '[~]', pending: '[ ]' }
   const when = new Date(input.now).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
 
   const sections = [
-    `# 交接说明（${when}）`,
+    H.title(when),
     '',
-    `工作目录：\`${input.cwd}\``,
-    '本说明由交接按钮在本机整理，没有调用模型；内容是原话摘录，不是完整总结。',
+    H.folder(input.cwd),
+    H.madeHere,
     '',
-    '## 最初的目标',
-    users[0] ? clip(redact(users[0]), GOAL_LIMIT) : '（没有找到）',
+    H.goal,
+    users[0] ? clip(redact(users[0], lang), GOAL_LIMIT, lang) : H.notFound,
     '',
-    '## 最近的指示（原话，最新的在最后）',
-    ...(users.length > 1 ? users.slice(1).slice(-RECENT_USER).map(t => `- ${clip(redact(t), USER_LIMIT).replace(/\n/g, '\n  ')}`) : ['（没有）']),
+    H.recent,
+    ...(users.length > 1 ? users.slice(1).slice(-RECENT_USER).map(u => `- ${clip(redact(u, lang), USER_LIMIT, lang).replace(/\n/g, '\n  ')}`) : [H.none]),
     '',
-    '## Claude 最后的汇报',
-    lastReport ? clip(redact(lastReport.text), REPORT_LIMIT) : '（没有）',
+    H.report,
+    lastReport ? clip(redact(lastReport.text, lang), REPORT_LIMIT, lang) : H.none,
     '',
-    '## 任务清单',
-    ...(plan.length > 0 ? plan.map(i => `- ${mark[i.status] ?? '[ ]'} ${redact(i.content)}`) : ['（这个会话没有任务清单）']),
+    H.plan,
+    ...(plan.length > 0 ? plan.map(i => `- ${mark[i.status] ?? '[ ]'} ${redact(i.content, lang)}`) : [H.noPlan]),
     '',
-    '## 改过的文件',
-    ...(files.length > 0 ? files.map(f => `- \`${f}\``) : ['（没有）']),
+    H.files,
+    ...(files.length > 0 ? files.map(f => `- \`${f}\``) : [H.none]),
     '',
-    '## 最近的检查（接手后请重跑一次再相信）',
-    ...(checks.length > 0 ? checks : ['（没有跑过）']),
+    H.checks,
+    ...(checks.length > 0 ? checks : [H.noChecks]),
     '',
-    '## 代码状态',
+    H.code,
     ...(input.git
-      ? ['```', redact(input.git.status.split('\n').slice(0, STATUS_LINES).join('\n')).trim() || '（工作区干净）', '```', `最近一次提交：${redact(input.git.lastCommit).trim() || '（没有）'}`]
-      : ['（不是 git 仓库）']),
+      ? ['```', redact(input.git.status.split('\n').slice(0, STATUS_LINES).join('\n'), lang).trim() || H.cleanTree, '```', H.lastCommit(redact(input.git.lastCommit, lang).trim() || H.none)]
+      : [H.noGit]),
     '',
-    '## 待办记录',
-    ...(input.ledger ? [`来自 \`${input.ledger.path}\`：`, '', clip(redact(input.ledger.text), LEDGER_LIMIT)] : ['（工作目录里没有 OUTSTANDING.md）']),
+    H.ledgers,
+    ...(input.ledgers?.length ? input.ledgers.flatMap(ledger => [H.ledgerFrom(ledger.path), '', clip(redact(ledger.text, lang), LEDGER_LIMIT, lang), '']) : [H.noLedgers]),
     '',
-    '## 原会话记录',
-    input.transcriptPath
-      ? `\`${input.transcriptPath}\`（很大：需要细节时按关键词搜索，不要整份读取）`
-      : '（没有找到记录文件）',
+    H.transcript,
+    input.transcriptPath ? H.transcriptAt(input.transcriptPath) : H.noTranscript,
   ]
 
   const kickoff = [
-    '请接手上一个会话的工作。',
+    H.takeOver,
     '',
-    firstCheck(input.cwd),
+    firstCheck(input.cwd, lang),
     '',
-    `1. 先读交接说明：${input.notePath}`,
-    '2. 核对现在的实际状态（git status、相关文件、待办记录），以现状为准。',
-    '3. 只继续没做完的部分，不要重复已完成的工作；有等我决定的事，先用一句话重新问我。',
-    ...(input.transcriptPath ? [`4. 需要更多细节时，到原会话记录里按关键词搜索，不要整份读取：${input.transcriptPath}`] : []),
+    H.readNote(input.notePath),
+    H.checkState,
+    H.continueOnly,
+    ...(input.transcriptPath ? [H.searchTranscript(input.transcriptPath)] : []),
     '',
-    '下一步：',
+    H.next,
   ].join('\n')
 
-  return { note: redactShapes(sections.join('\n') + '\n'), kickoff: redactShapes(kickoff) }
+  return { note: redactShapes(sections.join('\n') + '\n', lang), kickoff: redactShapes(kickoff, lang) }
 }
 
 // The desktop app opens `claude://code/new?q=…&folder=…` as a new Code session in that folder with
@@ -274,13 +276,14 @@ export function buildHandoff(input: HandoffInput): { note: string; kickoff: stri
 // while it fits, so it can be reviewed right there; a longer one is sent by its path instead.
 export const PREFILL_LIMIT = 12_000
 
-export function prefill(kickoff: string, note: string, notePath: string, folder: string): string {
+export function prefill(kickoff: string, note: string, notePath: string, folder: string, lang: Lang = 'zh'): string {
+  const H = t(lang).handoff
   const whole = [
-    '请接手上一个会话的工作。下面是交接说明（同一份也存在 ' + notePath + '）。',
+    H.prefillHead(notePath),
     '',
-    firstCheck(folder),
+    firstCheck(folder, lang),
     '',
-    '读完后：先核对现在的实际状态（git status、相关文件、待办记录），以现状为准；只继续没做完的部分，不要重复已完成的工作；有等我决定的事，先用一句话重新问我。需要更多细节时，到交接说明里写的原会话记录按关键词搜索，不要整份读取。',
+    H.afterReading,
     '',
     '---',
     '',
@@ -288,16 +291,16 @@ export function prefill(kickoff: string, note: string, notePath: string, folder:
     '',
     '---',
     '',
-    '下一步：',
+    H.next,
   ].join('\n')
-  return redactShapes(whole.length <= PREFILL_LIMIT ? whole : kickoff)
+  return redactShapes(whole.length <= PREFILL_LIMIT ? whole : kickoff, lang)
 }
 
 // A link-opened session can start without its folder, and in the ask-every-time mode instead of
 // Auto, which then asks for every approval. The new session moves itself to the folder; the mode
 // is the user's to switch, so it only says so.
-export function firstCheck(folder: string): string {
-  return `开工前先检查本会话（get_session self）：工作文件夹应是 ${folder} 或它所在的项目，不是的话先用 change_directory 切过去；权限模式应是 auto，不是的话，回复第一行用中文告诉我“这个会话是每次询问模式，请在输入框下方把模式切回 Auto”，不要自己改模式。`
+export function firstCheck(folder: string, lang: Lang = 'zh'): string {
+  return t(lang).handoff.firstCheck(folder)
 }
 
 export function newSessionLink(text: string, folder: string): string {

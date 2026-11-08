@@ -4,10 +4,13 @@ import type { AgentStatus, BuiltinToolResults, ElementTable, EngineInterface, Re
 import type { BackgroundSnapshot, TurnTiming, WatchedAgent } from '../types'
 import { codexRow, commandDirs, DAY_MS, MAX_READ, mentionsCodex, owned, pad, parseCodex } from './codex'
 import type { CodexRecord } from './codex'
+import { detectLang, resetLang, t } from './i18n'
+import type { Lang } from './i18n'
 
 // The phone draws no AbovePrompt band; a Pane is raised on every surface, the mobile app's included.
 const PANE = 'agent-watch'
-const PANE_TITLE = '子助手'
+const STALL_MS = 10 * 60_000
+const selected = atom({ plugin: 'agent-watch', key: 'selected' } as const, null as string | null)
 const agents = atom({ plugin: 'agent-watch', key: 'agents' } as const, [] as WatchedAgent[])
 const tick = atom({ plugin: 'agent-watch', key: 'tick' } as const, 0)
 const doneOpen = atom({ plugin: 'agent-watch', key: 'doneOpen' } as const, false)
@@ -15,6 +18,8 @@ const turn = atom({ plugin: 'agent-watch', key: 'turn' } as const, {} as TurnTim
 const background = atom({ plugin: 'agent-watch', key: 'background' } as const, { tasks: [], crons: 0 } as BackgroundSnapshot)
 const codex = atom({ plugin: 'agent-watch', key: 'codex' } as const, [] as WatchedAgent[])
 const codexDirs = atom({ plugin: 'agent-watch', key: 'codexDirs' } as const, [] as string[])
+// The language of the text the mod draws, set at every hook entry; the Chinese default keeps a draw before the first answer as it was.
+let lang: Lang = 'zh'
 let lastNow: number | undefined
 let timer: Timer | undefined
 let codexRows: WatchedAgent[] = []
@@ -23,6 +28,10 @@ let codexScan: Promise<WatchedAgent[]> | undefined
 let since: number | undefined
 // A detached Codex command writes its record a moment after Bash returns: look again for a minute.
 let codexExpectUntil = -Infinity
+
+async function speak($: EngineInterface, setting: unknown) {
+  lang = await detectLang($, setting)
+}
 
 async function clockNow($: EngineInterface) {
   try {
@@ -34,13 +43,23 @@ async function clockNow($: EngineInterface) {
 async function togglePane($: EngineInterface) {
   const panes = await $.ui.panes().catch(() => undefined)
   if (panes === undefined) return
-  if (panes.some(pane => pane.id === PANE)) await $.ui.close({ id: PANE }).catch(() => {})
-  else await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => {})
+  if (panes.some(pane => pane.id === PANE)) {
+    try {
+      await $.ui.close({ id: PANE })
+      await update($, selected, () => null)
+    } catch {}
+  }
+  else await $.ui.open({ id: PANE, title: t(lang).paneTitle }).catch(() => {})
   await update($, tick, n => n + 1).catch(() => {})
 }
 
 async function toggleDone($: EngineInterface) {
   await update($, doneOpen, open => !open).catch(() => {})
+}
+
+async function noteActivity($: EngineInterface, id: string) {
+  const at = await clockNow($)
+  if (at !== undefined) await update($, agents, list => list.map(a => a.id === id ? { ...a, lastActivityAt: at } : a)).catch(() => {})
 }
 
 // After a reload mid-run the mod misses those agents' turn.complete: whatever a successful list no
@@ -127,7 +146,7 @@ async function scanCodex($: EngineInterface, since: number, current: number, roo
       }
       const r = hit.record
       if (!r || (r.startedAt ?? 0) < since || !owned(r.cwd, root, dirs) || rows.some(a => a.id === `codex:${r.id}`)) continue
-      rows.push(codexRow(r, entry.mtimeMs, current))
+      rows.push(codexRow(r, entry.mtimeMs, current, lang))
     }
     if (day >= current) break
   }
@@ -146,12 +165,16 @@ async function readRecord($: EngineInterface, path: string, size: number) {
   return `${head.stdout}\n${tail.stdout}`
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  resetLang()
+  lang = options.language === 'en' ? 'en' : 'zh'
   const ended = new Map<string, number>()
+  const transcripts = new Map<string, { at: number; messages: Promise<{ role: string; text: string }[] | undefined> }>()
 
   on('session.start', async ($, e, next) => {
+    await speak($, options.language)
     const r = await next(e)
-    await $.command.register({ name: 'agent-watch', description: '在面板里看子助手进度（手机上也能看）' }).catch(() => {})
+    await $.command.register({ name: 'agent-watch', description: t(lang).commandDescription }).catch(() => {})
     await endMissing($).catch(() => {})
     void refreshCodex($, true).catch(() => {})
     return r
@@ -160,18 +183,21 @@ export const register: Register = on => {
   // Closing the pane by Esc or its mark redraws the details button.
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const r = await next(e)
+    await update($, selected, () => null).catch(() => {})
     await update($, tick, n => n + 1).catch(() => {})
     return r
   })
 
   on('command.run', { command: 'agent-watch' }, async $ => {
-    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE }).catch((err: unknown) => ({ isPlaced: false as const, reason: err instanceof Error ? err.message : String(err) }))
-    if (opened.isPlaced) return { text: '子助手面板已打开。' }
+    await speak($, options.language)
+    const opened = await $.ui.open({ id: PANE, title: t(lang).paneTitle }).catch((err: unknown) => ({ isPlaced: false as const, reason: err instanceof Error ? err.message : String(err) }))
+    if (opened.isPlaced) return { text: t(lang).paneOpened }
     // The engine's reason names what keeps it undrawn: a narrow window, a surface that places no panes.
-    return { text: `子助手面板没能打开（${opened.reason}）。可以稍后再输入 /agent-watch 试一次。` }
+    return { text: t(lang).paneFailed(opened.reason) }
   })
 
   on('agent.spawn', async ($, e, next) => {
+    await speak($, options.language)
     const startedAt = await clockNow($)
     const r = await next(e)
     if (!r.agentId || e.workflow) return r
@@ -181,19 +207,20 @@ export const register: Register = on => {
       const old = list.find(a => a.id === id)
       const one: WatchedAgent = {
         id, description: e.description, type: e.subagentType, parentId: e.parentAgentId,
-        status: 'running', model: r.model, startedAt, steps: 0, latest: '', tasks: {}, ...old,
+        status: 'running', model: r.model, startedAt, lastActivityAt: startedAt, steps: 0, latest: '', tasks: {}, ...old,
       }
-      if (e.resume) Object.assign(one, { status: 'running', endedAt: undefined, endUnknown: undefined })
+      if (e.resume) Object.assign(one, { status: 'running', endedAt: undefined, endUnknown: undefined, lastActivityAt: startedAt })
       return [one, ...list.filter(a => a.id !== id)]
     }).catch(() => undefined)
     if (list) keepTicking($, ended, list, working(await read($, turn).catch(() => ({})))) // a failed write leaves a running tick alone
     try { await $.ui.invalidate('ui.render') } catch {}
     const surfaces = await $.session.surfaces().catch((): readonly RenderSurface[] => [])
-    if (surfaces.includes('mobile')) void $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => {})
+    if (surfaces.includes('mobile')) void $.ui.open({ id: PANE, title: t(lang).paneTitle }).catch(() => {})
     return r
   })
 
   on('tool.call', async ($, e, next) => {
+    await speak($, options.language)
     const isCodex = e.tool === 'Bash' && mentionsCodex(e.command ?? '')
     if (isCodex) await noteCodexDirs($, e.command ?? '').catch(() => {})
     if (!e.agentId) {
@@ -202,8 +229,10 @@ export const register: Register = on => {
       return r
     }
     await refresh($, ended).catch(() => {})
+    await noteActivity($, e.agentId)
     await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, steps: a.steps + 1, latest: latestStep(e) } : a)).catch(() => {})
     const r = await next(e)
+    await noteActivity($, e.agentId)
     if (isCodex) await refreshCodex($, true).catch(() => {})
     if (r.deny || r.isError) return r
     if (e.tool === 'TaskCreate') {
@@ -226,7 +255,9 @@ export const register: Register = on => {
       await update($, turn, () => ({ turnId: e.turnId, startedAt })).catch(() => {})
       keepTicking($, ended, await read($, agents).catch(() => []), true)
     }
+    if (e.agentId) await noteActivity($, e.agentId)
     const r = yield* next(e)
+    if (e.agentId) await noteActivity($, e.agentId)
     return r
   })
 
@@ -235,13 +266,14 @@ export const register: Register = on => {
       tasks: (e.background_tasks ?? [])
         .filter(task => task.type !== 'subagent' && (!task.status || task.status === 'running' || task.status === 'pending'))
         // A description that repeats the command line is dropped with it: a command can hold a secret.
-        .map(task => ({ id: task.id, type: task.type, description: task.command && task.description.startsWith(task.command.slice(0, 20)) ? '' : [...task.description].slice(0, 80).join('') })),
+        .map(task => ({ id: task.id, type: task.type, status: task.status === 'pending' ? 'pending' as const : 'running' as const, description: task.command && task.description.startsWith(task.command.slice(0, 20)) ? '' : [...task.description].slice(0, 80).join('') })),
       crons: e.session_crons?.length ?? 0,
     })).catch(() => {})
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
+    await speak($, options.language)
     const r = await next(e)
     const endedAt = await clockNow($)
     if (!e.agentId) {
@@ -259,6 +291,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    await speak($, options.language)
     await read($, agents).catch(() => {})
     await read($, tick).catch(() => {})
     const timing = await read($, turn).catch(() => ({} as TurnTiming))
@@ -272,13 +305,13 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return rest
     let elements
     try { elements = $.ui.resolve(e) } catch { return rest }
-    const { Box, Button } = elements
+    const { Box, Button, Text } = elements
     // One line that opens or hides the side pane, the top band of the stack.
     const mine = (
       <Box key="momo-band-1-agents" flexDirection="row">
-        <Button key="agents" plain label={statusLabel(e.props.isWorking, timing, bg, list, current)} onPress={() => togglePane($)} />
+        <Button key="agents" plain label={statusLabel(e.props.isWorking, timing, bg, list, current, lang)} onPress={() => togglePane($)}><Text color={e.props.isWorking ? '#2A6FBF' : waiting(bg, list) ? 'warning' : 'inactive'}>{statusLabel(e.props.isWorking, timing, bg, list, current, lang)}</Text></Button>
         <Box flexGrow={1} />
-        <Button key="details" plain label={open ? '详情 ‹' : '详情 ›'} onPress={() => togglePane($)} />
+        <Button key="details" plain label={`${t(lang).details} ${open ? '‹' : '›'}`} onPress={() => togglePane($)} />
       </Box>
     )
     return stack(rest, mine, Box)
@@ -286,6 +319,7 @@ export const register: Register = on => {
 
   // The same rows in a pane, every agent of the session, wrapped instead of cut for a narrow phone.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    await speak($, options.language)
     await read($, agents).catch(() => {})
     await read($, tick).catch(() => {})
     const timing = await read($, turn).catch(() => ({} as TurnTiming))
@@ -299,41 +333,66 @@ export const register: Register = on => {
     let elements
     try { elements = $.ui.resolve(e) } catch { return next(e) }
     const { Box, Text, Button } = elements
-    const runningRows = ordered(list.filter(a => active(a.status)))
+    const activeRows = list.filter(a => active(a.status))
+    // A stalled child comes before a healthy parent; retain nesting within each priority group.
+    const runningRows = [...ordered(activeRows.filter(a => stalled(a, current))), ...ordered(activeRows.filter(a => !stalled(a, current)))]
+    const chosen = await read($, selected).catch(() => null)
+    if (chosen) {
+      const a = list.find(a => a.id === chosen)
+      let hit = transcripts.get(chosen)
+      if (a && (!hit || (current !== undefined && current - hit.at >= 5000))) {
+        const messages = $.session.messages({ agentId: chosen }).then(result => 'deny' in result ? undefined : result.slice(-20)).catch(() => undefined)
+        hit = { at: current ?? -Infinity, messages }
+        transcripts.set(chosen, hit)
+      }
+      const messages = a ? await hit?.messages : undefined
+      return (
+        <Box flexDirection="column">
+          <Button key="back" plain label="‹" onPress={() => update($, selected, () => null)} />
+          {a && <Text color={rowColor(a, current)}>{rowText(a, current, lang)}</Text>}
+          {a?.latest && <Text dimColor>{`└ ${a.latest}`}</Text>}
+          {!messages || 'deny' in messages ? <Text>{t(lang).transcriptUnreadable}</Text>
+            : messages.length ? messages.slice(-20).map((m, i) => <Box key={`message-${i}`} flexDirection="column" marginTop={1}><Text dimColor>{m.role === 'assistant' ? t(lang).roleAgent : t(lang).roleTask}</Text><Text>{m.text}</Text></Box>)
+            : <Text dimColor>{t(lang).noMessages}</Text>}
+        </Box>
+      )
+    }
     const finishedRows = ordered(list.filter(a => !active(a.status)))
     return (
       <Box flexDirection="column">
-        <Text bold>{list.length ? summary(list) : '这个会话还没有子助手。'}</Text>
-        <Box marginTop={1}><Text bold>当前任务</Text></Box>
-        <Text>{stateLine(isWorking, waiting(bg, list), timing, current)}</Text>
+        <Text bold>{list.length ? summary(list, current, lang) : t(lang).noAgents}</Text>
+        <Box marginTop={1}><Text bold>{t(lang).currentTask}</Text></Box>
+        <Text color={isWorking ? '#2A6FBF' : waiting(bg, list) ? 'warning' : 'inactive'}>{stateLine(isWorking, waiting(bg, list), timing, current, lang)}</Text>
         {timing.startedAt !== undefined && (isWorking || timing.endedAt !== undefined) && (
-          <Text>{`${isWorking ? '这一轮已做' : '上一轮做了'} ${duration(timing.startedAt, isWorking ? current : timing.endedAt)}`}</Text>
+          <Text>{`${isWorking ? t(lang).thisTurn : t(lang).lastTurn} ${duration(timing.startedAt, isWorking ? current : timing.endedAt)}`}</Text>
         )}
         <Box marginTop={1}>
-          <Text bold>{`运行中 ${runningRows.length}`}</Text>
+          <Text bold>{t(lang).runningWaiting(runningRows.length)}</Text>
         </Box>
-        {!runningRows.length && <Text dimColor>现在没有在运行的子助手。</Text>}
+        {!runningRows.length && <Text dimColor>{t(lang).noneRunning}</Text>}
         {runningRows.map(({ agent: a, depth }) => (
           <Box key={a.id} flexDirection="column" marginLeft={depth * 2} marginTop={1}>
-            <Text>{rowText(a, current)}</Text>
+            <Text color={rowColor(a, current)}>{rowText(a, current, lang)}</Text>
+            {!a.id.startsWith('codex:') && <Button key={`open:${a.id}`} plain label={t(lang).open} onPress={() => update($, selected, () => a.id)} />}
             {(a.status === 'running' || a.status === 'pending') && a.latest && <Text dimColor>{`└ ${a.latest}`}</Text>}
           </Box>
         ))}
         {finishedRows.length > 0 && (
           <Box marginTop={1}>
-            <Button key="done" plain label={`已完成 ${finishedRows.length} ${open ? '▾' : '▸'}`} onPress={() => toggleDone($)} />
+            <Button key="done" plain label={t(lang).doneFold(finishedRows.length, open ? '⌃' : '⌄')} onPress={() => toggleDone($)} />
           </Box>
         )}
         {open && finishedRows.map(({ agent: a, depth }) => (
           <Box key={a.id} flexDirection="column" marginLeft={depth * 2} marginTop={1}>
-            <Text>{rowText(a, current)}</Text>
+            <Text color={rowColor(a, current)}>{rowText(a, current, lang)}</Text>
+            {!a.id.startsWith('codex:') && <Button key={`open:${a.id}`} plain label={t(lang).open} onPress={() => update($, selected, () => a.id)} />}
           </Box>
         ))}
         {(bg.tasks.length > 0 || bg.crons > 0) && (
           <Box flexDirection="column" marginTop={1}>
-            <Text bold>{`后台 ${bg.tasks.length + bg.crons}`}</Text>
-            {bg.tasks.map(task => <Text key={task.id}>{task.description ? `${typeName(task.type)} · ${task.description}` : typeName(task.type)}</Text>)}
-            {bg.crons > 0 && <Text>{`定时唤醒 ${bg.crons} 个`}</Text>}
+            <Text bold>{t(lang).background(bg.tasks.length + bg.crons)}</Text>
+            {bg.tasks.map(task => <Text key={task.id} color={task.status === 'pending' ? 'warning' : '#2A6FBF'}>{`${task.status === 'pending' ? t(lang).bgWaiting : t(lang).bgRunning} · ${typeName(task.type, lang)}${task.description ? ` · ${task.description}` : ''}`}</Text>)}
+            {bg.crons > 0 && <Text>{t(lang).cronsPane(bg.crons)}</Text>}
           </Box>
         )}
       </Box>
@@ -377,10 +436,12 @@ function running(a: WatchedAgent) {
   return a.status === 'running' || a.status === 'pending'
 }
 
-function summary(list: WatchedAgent[]) {
+function summary(list: WatchedAgent[], current: number | undefined, lang: Lang) {
   const done = list.filter(a => a.status === 'completed').length
   const failed = list.filter(a => a.status === 'failed' || a.status === 'killed').length
-  return `子助手 ${list.filter(a => active(a.status)).length} 运行中 · ${done} 完成${failed ? ` · ${failed} 失败` : ''}`
+  const stuck = list.filter(a => stalled(a, current)).length
+  const waits = list.filter(a => active(a.status) && !running(a) && !stalled(a, current)).length
+  return t(lang).summary(list.filter(a => running(a) && !stalled(a, current)).length, waits, stuck, done, failed)
 }
 
 function working(timing: TurnTiming) {
@@ -391,35 +452,38 @@ function waiting(bg: BackgroundSnapshot, list: WatchedAgent[]) {
   return list.some(a => active(a.status)) || bg.tasks.length > 0 || bg.crons > 0
 }
 
-function stateLine(isWorking: boolean, waits: boolean, timing: TurnTiming, current: number | undefined) {
+function stateLine(isWorking: boolean, waits: boolean, timing: TurnTiming, current: number | undefined, lang: Lang) {
   // A turn the mod has not timed yet (its first step not heard) shows no number rather than the last turn's.
-  return isWorking ? `● 正在工作 ${timing.endedAt === undefined ? duration(timing.startedAt, current) : '—'}`
-    : waits ? '◐ 已停下，在等后台' : '○ 已停下，没有在跑的任务'
+  return isWorking ? t(lang).working(timing.endedAt === undefined ? duration(timing.startedAt, current) : '—')
+    : waits ? t(lang).stoppedWaiting : t(lang).stopped
 }
 
-function typeName(type: string) {
-  return type === 'shell' ? '后台命令' : type === 'monitor' ? '监控' : type === 'workflow' ? '流程' : '其他后台'
+function typeName(type: string, lang: Lang) {
+  const names = t(lang).typeNames
+  return type === 'shell' ? names.shell : type === 'monitor' ? names.monitor : type === 'workflow' ? names.workflow : names.other
 }
 
-function statusLabel(isWorking: boolean, timing: TurnTiming, bg: BackgroundSnapshot, list: WatchedAgent[], current: number | undefined) {
+function statusLabel(isWorking: boolean, timing: TurnTiming, bg: BackgroundSnapshot, list: WatchedAgent[], current: number | undefined, lang: Lang) {
   const waits = waiting(bg, list)
-  const parts = [stateLine(isWorking, waits, timing, current)]
+  const parts = [stateLine(isWorking, waits, timing, current, lang)]
   const count = list.filter(a => active(a.status)).length
-  if (count) parts.push(`子助手 ${count}${isWorking ? ' 在跑' : ''}`)
-  for (const name of ['后台命令', '监控', '流程', '其他后台']) {
-    const n = bg.tasks.filter(task => typeName(task.type) === name).length
+  if (count) parts.push(t(lang).agentsCount(count, isWorking && list.filter(a => active(a.status)).every(a => running(a) && !stalled(a, current))))
+  for (const name of Object.values(t(lang).typeNames)) {
+    const n = bg.tasks.filter(task => typeName(task.type, lang) === name).length
     if (n) parts.push(`${name} ${n}`)
   }
-  if (bg.crons > 0) parts.push(`定时唤醒 ${bg.crons}`)
-  if (!isWorking && waits) parts.push(`已等 ${minutes(timing.endedAt, current)}`)
-  else if (!isWorking && timing.startedAt !== undefined && timing.endedAt !== undefined) parts.push(`上一轮做了 ${duration(timing.startedAt, timing.endedAt)}`)
+  const stuck = list.filter(a => stalled(a, current)).length
+  if (stuck) parts.push(t(lang).stuckCount(stuck))
+  if (bg.crons > 0) parts.push(t(lang).cronsBand(bg.crons))
+  if (!isWorking && waits) parts.push(t(lang).waited(minutes(timing.endedAt, current, lang)))
+  else if (!isWorking && timing.startedAt !== undefined && timing.endedAt !== undefined) parts.push(t(lang).lastTurnTook(duration(timing.startedAt, timing.endedAt)))
   return parts.join(' · ')
 }
 
-function rowText(a: WatchedAgent, current: number | undefined) {
-  const tasks = Object.keys(a.tasks).length ? ` · 待办 ${Object.values(a.tasks).filter(Boolean).length}/${Object.keys(a.tasks).length}` : ''
+function rowText(a: WatchedAgent, current: number | undefined, lang: Lang) {
+  const tasks = Object.keys(a.tasks).length ? t(lang).todo(Object.values(a.tasks).filter(Boolean).length, Object.keys(a.tasks).length) : ''
   // A Codex record too large to read whole has no step count.
-  return `${icon(a.status)} ${a.description} · ${a.type} · ${a.model ?? '—'} · ${elapsed(a, current)}${a.steps >= 0 ? ` · ${a.steps} 步` : ''}${tasks}${a.endUnknown ? ' · 结束方式未知' : ''}`
+  return `${itemState(a, current, lang)} ${a.description} · ${a.type} · ${a.model ?? '—'} · ${elapsed(a, current)}${a.steps >= 0 ? t(lang).steps(a.steps) : ''}${tasks}${a.endUnknown ? t(lang).endUnknown : ''}`
 }
 
 async function refresh($: EngineInterface, ended: Map<string, number>, persist = true) {
@@ -429,8 +493,9 @@ async function refresh($: EngineInterface, ended: Map<string, number>, persist =
     const list = [...old]
     for (const info of listed) {
       const i = list.findIndex(a => a.id === info.id)
-      const a = list[i] ?? { steps: 0, latest: '', tasks: {} }
-      const one: WatchedAgent = { ...a, ...info, endUnknown: undefined }
+      const previous = list[i]
+      const a = previous ?? { steps: 0, latest: '', tasks: {} }
+      const one: WatchedAgent = { ...a, ...info, endUnknown: undefined, lastActivityAt: previous?.lastActivityAt ?? current }
       if (active(info.status)) {
         ended.delete(info.id)
         one.endedAt = undefined
@@ -453,8 +518,21 @@ function active(status: AgentStatus) {
   return status === 'pending' || status === 'running' || status === 'waiting' || status === 'idle'
 }
 
-function icon(status: AgentStatus) {
-  return status === 'completed' ? '✅' : status === 'failed' || status === 'killed' ? '✗' : status === 'waiting' || status === 'idle' ? '⏸' : '⏳'
+function stalled(a: WatchedAgent, current: number | undefined) {
+  return active(a.status) && current !== undefined && a.lastActivityAt !== undefined && current - a.lastActivityAt >= STALL_MS
+}
+
+function itemState(a: WatchedAgent, current: number | undefined, lang: Lang) {
+  if (a.status === 'completed') return t(lang).itemDone
+  if (a.status === 'failed' || a.status === 'killed') return t(lang).itemFailed
+  // U+25D0 is CIRCLE WITH LEFT HALF BLACK, never U+25D1.
+  if (stalled(a, current)) return t(lang).itemStuck(Math.floor((current! - a.lastActivityAt!) / 60_000))
+  return running(a) ? t(lang).itemRunning : t(lang).itemWaiting
+}
+
+function rowColor(a: WatchedAgent, current: number | undefined) {
+  return a.status === 'completed' ? 'success' : a.status === 'failed' || a.status === 'killed' ? 'error'
+    : stalled(a, current) || !running(a) ? 'warning' : '#2A6FBF'
 }
 
 function elapsed(a: WatchedAgent, now: number | undefined) {
@@ -462,10 +540,10 @@ function elapsed(a: WatchedAgent, now: number | undefined) {
   return duration(a.startedAt, end)
 }
 
-function minutes(start: number | undefined, end: number | undefined) {
+function minutes(start: number | undefined, end: number | undefined, lang: Lang) {
   if (start === undefined || end === undefined) return '—'
   const m = Math.floor(Math.max(0, end - start) / 60_000)
-  return m < 1 ? '不到 1m' : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
+  return m < 1 ? t(lang).underOneMinute : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`
 }
 
 function duration(start: number | undefined, end: number | undefined) {

@@ -1,3 +1,16 @@
+export type RewindSelection = { sessionId: string; cwd: string; messages: { role: 'user' | 'assistant'; text: string; isQuestion: boolean }[] }
+export type SideQuestion = {
+  question: string
+  answer: string
+  at: number
+  engine: string // the host answering the side question
+  modelAtRequest?: string // selected model, not a provider receipt for model.fork's earlier snapshot
+  status: 'pending' | 'answered' | 'failed'
+  error?: string
+}
+export type SideHistory = { version: 1; sessionId: string; questions: SideQuestion[] }
+export type SideView = { questions: SideQuestion[]; text: string; busy: boolean }
+
 // The main conversation's prompt cache, as the last main-loop response left it.
 export type CacheState = {
   at: number // when that response came back, in $.clock.now() milliseconds
@@ -26,6 +39,9 @@ declare module 'claude-code' {
       closeoutBusy: boolean
       tick: number
       workedIn: string | null
+      rewindSelection: RewindSelection | null
+      conversationStatus: string
+      sideView: SideView | null
     }
   }
 }

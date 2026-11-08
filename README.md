@@ -1,15 +1,24 @@
 # claude-code-mods
 
 Three small mods for Claude Code: a sub-agent pane, a quick-button toolbar and a usage footer.
-Their on-screen text is in Chinese.
+Their on-screen text, and the requests they send to Claude, are in English or Chinese, following
+your system language.
 
-Claude Code 的三个小 mod：子助手面板、一排快捷按钮、用量显示。界面文字是中文。
+Claude Code 的三个小 mod：子助手面板、一排快捷按钮、用量显示。系统语言是中文时界面为中文，其他语言为英文。
 
 | Mod | What it shows |
 |---|---|
-| `agent-watch` | A band above the prompt and a 子助手 pane: every sub-agent of the chat with its status, latest activity, steps and elapsed time. Codex runs this chat started through Bash (`codex exec`) show as rows too. |
-| `session-toolbar` | Buttons above the prompt: 进度 (ask for progress and decisions), 交接 (write a handoff note without a model call and open a new chat with it), 压缩 (`/compact`), 撤回 (`/rewind`), 旁问 (`/btw`), 收尾 (check commit, push, merge and CI). |
+| `agent-watch` | A band above the prompt and a Sub-agents pane: every sub-agent of the chat with its status, latest activity, steps and elapsed time. Codex runs this chat started through Bash (`codex exec`) show as rows too. |
+| `session-toolbar` | Buttons above the prompt: Progress (ask for progress and decisions), Handoff (write a handoff note without a model call and open a new chat with it), Compact (`/compact`), Rewind (continue from an earlier question in a new chat), Aside (a side question), Closeout (check commit, push, merge and CI). |
 | `session-usage` | Plan usage, prompt cache and context in the prompt footer; a click opens details with a pace estimate. |
+
+## Language
+
+Each mod has a `language` setting: `auto` (the default) follows the system language, Chinese when
+it starts with `zh` and English otherwise; `zh` or `en` forces one. Change it in `/config`. To find
+the system language, `auto` reads `LC_ALL`, `LC_MESSAGES` and `LANG`, then asks the system once
+per load (`defaults read -g AppleLanguages` on macOS, `(Get-UICulture).Name` in PowerShell on
+Windows).
 
 ## Install
 
@@ -42,21 +51,21 @@ Then run `/reload-plugins` in a session, or restart the app. Update later with
 ## What they read and write
 
 None of them has a server of its own or sends analytics. The only network calls the mods make
-themselves are 收尾's `git` and `gh` commands to your project's own remote; buttons such as 进度
-and 压缩 send an ordinary Claude request, as typing it would.
+themselves are Closeout's `git` and `gh` commands to your project's own remote; buttons such as
+Progress and Compact send an ordinary Claude request, as typing it would.
 
 - `agent-watch` reads the engine's sub-agent list and the Codex run records of the last week under
   `~/.codex/sessions` (or `$CODEX_HOME/sessions`), and shows only the runs that started in this
   chat's project or in a folder a Codex command of this chat named: a run's model, first prompt line
   and latest message line.
 - `session-toolbar`:
-  - 交接 reads the chat's messages and transcript, the project's `OUTSTANDING.md` if there is one,
+  - Handoff reads the chat's messages and transcript, the project's `OUTSTANDING.md` if there is one,
     and `git status` / `git log`. It writes the note to `~/.claude/handoffs/`, copies it to the
     clipboard and opens a new chat prefilled with it (a note too long for the prompt box is passed
     by its path instead). Text that looks like a credential (API keys,
-    tokens, passwords, bearer headers) is replaced with `[已隐去]`; a pattern list can miss one, so
+    tokens, passwords, bearer headers) is replaced with `[hidden]` (`[已隐去]` in Chinese); a pattern list can miss one, so
     read the note before you share it.
-  - 收尾 runs `git fetch --prune` (which updates your remote-tracking branches), other `git`
+  - Closeout runs `git fetch --prune` (which updates your remote-tracking branches), other `git`
     commands, and `gh run list` / `gh pr view` against the project's GitHub repository. It
     changes no files and pushes nothing.
 - `session-usage` reads the usage, cost and cache figures Claude Code already reports, and the

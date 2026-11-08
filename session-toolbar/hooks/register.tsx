@@ -2,7 +2,8 @@
 //   进度 asks Claude for decisions waiting on Momo, what is done and what comes next.
 //   交接 writes a handoff note with no model call and opens a new session with it prefilled.
 //   压缩 runs /compact, asking for a second press when the cache has gone cold.
-//   撤回 opens /rewind; 旁问 puts /btw in the prompt box; 收尾 checks commit, push, merge, CI and
+//   撤回 opens a new conversation from a chosen question; 旁问 keeps its own Q&A history.
+//   收尾 checks commit, push, merge, CI and
 //   the outstanding-work ledger with git and gh, and shows what is left.
 //   The phone draws no AbovePrompt band and places no pane, so the same buttons also live in a
 //   工具栏 pane (opened when a phone joins and on /toolbar) and in /toolbar's own output row, which
@@ -13,27 +14,24 @@ import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register, RenderElement, RenderNode, ResolveInput, Timer } from 'claude-code'
 
 import type { CacheState, CloseoutReport, HandoffStatus } from '../types'
-import { gatherFacts, judge } from './closeout'
+import { gatherFacts, judge, LEDGER_NAMES } from './closeout'
 import type { ReadResult } from './closeout'
 import { buildHandoff, clipboardCommand, newSessionLink, noteName, openCommand, prefill, findTranscript, isScratch, workFolder } from './handoff'
 import type { Platform } from './handoff'
+import { askSide, branch, choices, choiceText, history, historyText, selection } from './conversation'
+import type { RewindSelection, SideView } from '../types'
+import { langFor, t } from './i18n'
 
 // 进度: what the button sends, as Momo's own words, once the session is idle.
-export const PROGRESS_PROMPT = [
-  '请帮我对齐一下进度。从我上一条消息到现在，你发过的消息里同一件事以最新的说法为准。用中文分三段汇报，每段只列要点：',
-  '1. 需要我决定的事：每项一句话说清选项和你的推荐；没有就写“没有”。',
-  '2. 已经完成的事：每项附证据（提交号、测试或检查结果）；没核实过的写明“没核实”。',
-  '3. 下一步怎么推进：你接下来要做什么，哪些在等外部结果。',
-  '汇报前先快速核对实际状态（例如 git 状态、待办记录），不要开始新的工作。',
-].join('\n')
+export const PROGRESS_PROMPT = t('zh').progressPrompt
 
 const STATUS_MS = 3 * 60_000 // how long the last handoff's outcome stays above the prompt
-const ARM_MS = 10_000 // how long a cold-cache 压缩 waits for its confirming press
+// How long a cold-cache 压缩 waits for its confirming press.
+const ARM_MS = 10_000
 const BIG_CONTEXT = 100_000 // from here a cold cache makes a handoff the cheaper move
 const LABEL_CELLS = 8 // the closeout card's label column, in character cells
 const TICK_MS = 5_000 // how often time-bound hints are redrawn while one is showing
 const PANE = 'session-toolbar'
-const PANE_TITLE = '工具栏'
 
 // session-usage's own cache reading: undefined when that mod is not installed. Read, never written.
 const usageCache = { plugin: 'session-usage', key: 'cache' } as const
@@ -46,8 +44,19 @@ const closeoutBusy = atom({ plugin: 'session-toolbar', key: 'closeoutBusy' } as 
 const tick = atom({ plugin: 'session-toolbar', key: 'tick' } as const, 0)
 // The last project folder the session was seen in, for 交接 when its root is a scratch workspace.
 const workedIn = atom({ plugin: 'session-toolbar', key: 'workedIn' } as const, null as string | null)
+const rewindSelection = atom({ plugin: 'session-toolbar', key: 'rewindSelection' } as const, null as RewindSelection | null)
+const conversationStatus = atom({ plugin: 'session-toolbar', key: 'conversationStatus' } as const, '')
+const sideView = atom({ plugin: 'session-toolbar', key: 'sideView' } as const, null as SideView | null)
 
-export const register: Register = on => {
+// Synchronous locks also cover two surfaces pressing before an awaited state update settles.
+let branching = false
+let asking = false
+// The `language` setting of this load; the language itself is detected once, on first use.
+let setting: unknown = 'auto'
+const textOf = async ($: EngineInterface) => t(await langFor($, setting))
+
+export const register: Register = (on, options) => {
+  setting = options?.language ?? 'auto'
   let timer: Timer | undefined // one redraw timer, even if session.start fires again
 
   // Redraws while a hint depends on the clock: the handoff outcome (STATUS_MS), the 压缩
@@ -68,10 +77,13 @@ export const register: Register = on => {
         if (pending) await update($, tick, n => n + 1)
       })().catch(() => {})
     })
-    await $.command.register({ name: 'toolbar', description: '显示工具栏按钮（手机上也能用）' }).catch(() => {})
-    await $.command.register({ name: 'progress', description: '进度：让 Claude 汇报要你决定的事、已完成的事和下一步' }).catch(() => {})
-    await $.command.register({ name: 'handoff', description: '交接：写交接说明并在电脑上打开新会话' }).catch(() => {})
-    await $.command.register({ name: 'closeout', description: '收尾：核对提交、推送、合并、CI 和待办' }).catch(() => {})
+    const T = await textOf($)
+    await $.command.register({ name: 'toolbar', description: T.cmdToolbar }).catch(() => {})
+    await $.command.register({ name: 'progress', description: T.cmdProgress }).catch(() => {})
+    await $.command.register({ name: 'handoff', description: T.cmdHandoff }).catch(() => {})
+    await $.command.register({ name: 'closeout', description: T.cmdCloseout }).catch(() => {})
+    await $.command.register({ name: 'toolbar-rewind', description: T.cmdRewind }).catch(() => {})
+    await $.command.register({ name: 'toolbar-ask', description: T.cmdAsk }).catch(() => {})
     return r
   })
 
@@ -87,35 +99,40 @@ export const register: Register = on => {
   // A phone draws only panes: the toolbar opens as one as soon as a phone joins.
   on('session.attach', { surface: 'mobile' }, async ($, e, next) => {
     const r = await next(e)
-    void $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => {})
+    void textOf($).then(T => $.ui.open({ id: PANE, title: T.paneTitle })).catch(() => {})
     return r
   })
 
   on('command.run', { command: 'toolbar' }, async $ => {
-    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => ({ isPlaced: false as const }))
+    const T = await textOf($)
+    const opened = await $.ui.open({ id: PANE, title: T.paneTitle }).catch(() => ({ isPlaced: false as const }))
     // The row under this output draws the buttons where the surface can; the text is for one that cannot,
     // such as a Remote Control phone. Why the pane did not open means nothing to the person reading it.
-    if (opened.isPlaced) return { text: '工具栏面板已打开。' }
-    return { text: `工具栏：可以输入 /progress（进度）、/handoff（交接）、/closeout（收尾）、/compact（压缩）、/rewind（撤回）、/btw（旁问）。` }
+    if (opened.isPlaced) return { text: T.paneOpened }
+    return { text: T.commandList }
   })
 
   // A command hook may not submit a prompt (the turn would wait on the hook), so 进度 is sent just after it returns.
   on('command.run', { command: 'progress' }, async $ => {
     void $.clock.sleep(0).then(() => askProgress($), () => askProgress($))
-    return { text: '正在发出进度请求；Claude 正在忙的话，会在忙完后回答。' }
+    return { text: (await textOf($)).progressQueued }
   })
 
   on('command.run', { command: 'handoff' }, async $ => {
     await runHandoff($)
-    return { text: (await read($, handoff))?.text ?? '交接没有结果，可以再试一次 /handoff。' }
+    return { text: (await read($, handoff))?.text ?? (await textOf($)).handoffNoResult }
   })
+
+  on('command.run', { command: 'toolbar-rewind' }, async ($, e) => ({ text: await runRewind($, e.args.trim()) }))
+  on('command.run', { command: 'toolbar-ask' }, async ($, e) => ({ text: await runSide($, e.args.trim()) }))
 
   on('command.run', { command: 'closeout' }, async $ => {
     await runCloseout($)
     const r = await read($, closeout)
-    if (!r) return { text: '收尾检查没有结果，可以再试一次 /closeout。' }
+    const T = await textOf($)
+    if (!r) return { text: T.closeoutNoResult }
     const icon = (state: string) => (state === 'done' ? '✅' : state === 'missing' ? '⛔' : '❓')
-    return { text: [r.verdict, ...r.items.map(item => `${icon(item.state)} ${item.label}：${item.note}`)].join('\n') }
+    return { text: [r.verdict, ...r.items.map(item => `${icon(item.state)} ${item.label}${T.colon}${item.note}`), ...(r.prompt ? ['', T.continueHeader, r.prompt] : [])].join('\n') }
   })
 
   // /toolbar's output row: the buttons themselves, on every surface that draws it, the phone's included.
@@ -142,21 +159,44 @@ async function toolbar($: EngineInterface, e: ResolveInput, wrap: boolean): Prom
   const report = await read($, closeout)
   const checking = await read($, closeoutBusy)
   const armed = await read($, compactArmed)
+  const rewind = await read($, rewindSelection)
+  const conversationText = await read($, conversationStatus)
+  const side = await read($, sideView)
   const now = await $.clock.now()
+  const T = await textOf($)
   const { Box, Button, Text } = $.ui.resolve(e)
-  const hint = isCold(c, now) && (c?.tokens ?? 0) >= BIG_CONTEXT ? '缓存已过期，交接比压缩更省' : ''
-  const status = done && now - done.at < STATUS_MS ? done.text : armed && now - armed < ARM_MS ? '缓存已过期，压缩会重新读取整段对话；再点一次“压缩”确认' : ''
+  const hint = isCold(c, now) && (c?.tokens ?? 0) >= BIG_CONTEXT ? T.coldHint : ''
+  const status = done && now - done.at < STATUS_MS ? done.text : armed && now - armed < ARM_MS ? T.compactConfirm : ''
   const mine = (
     <Box key="momo-band-2-toolbar" flexDirection="column" gap="sm">
       <Box flexDirection="row" gap="sm" flexWrap={wrap ? 'wrap' : 'nowrap'}>
-        <Button key="progress" label="进度" onPress={() => askProgress($)} />
-        <Button key="handoff" label="交接" onPress={() => runHandoff($)} />
-        <Button key="compact" label="压缩" onPress={() => runCompact($)} />
-        <Button key="rewind" label="撤回" onPress={() => void $.command.run({ command: 'rewind' }).catch(() => {})} />
-        <Button key="btw" label="旁问" onPress={() => void $.prompt.fill({ text: '/btw ', mode: 'replace' }).catch(() => {})} />
-        <Button key="closeout" label="收尾" onPress={() => runCloseout($)} />
+        <Button key="progress" label={T.btnProgress} onPress={() => askProgress($)} />
+        <Button key="handoff" label={T.btnHandoff} onPress={() => runHandoff($)} />
+        <Button key="compact" label={T.btnCompact} onPress={() => runCompact($)} />
+        <Button key="rewind" label={T.btnRewind} onPress={() => runRewind($, '')} />
+        <Button key="btw" label={T.btnAside} onPress={async () => { await runSide($, ''); await fillDraft($, '/toolbar-ask ') }} />
+        <Button key="closeout" label={T.btnCloseout} onPress={() => runCloseout($)} />
         {hint !== '' && <Text dimColor>{hint}</Text>}
       </Box>
+      {conversationText !== '' && <Text>{conversationText}</Text>}
+      {rewind && <Box flexDirection="column" gap="sm">
+        <Text>{T.rewindPick}</Text>
+        {choices(rewind.messages).map((c, i) => ({ ...c, number: i + 1 })).slice(-20).map(c => (
+          <Button key={`rewind-choice-${c.index}`} label={`${c.number}. ${c.text.replace(/\s+/g, ' ').slice(0, 80)}`}
+            onPress={() => runRewind($, String(c.number))} />
+        ))}
+        <Button key="rewind-hide" label="⌃" onPress={() => update($, rewindSelection, () => null)} />
+      </Box>}
+      {side && <Box flexDirection="column" gap="sm">
+        {side.questions.length === 0 && <Text>{T.noAside}</Text>}
+        {side.questions.map((q, i) => <Box key={`side-record-${i}`} flexDirection="column">
+          <Text wrap="truncate">{new Date(q.at).toISOString()} · {q.engine} · {q.status === 'answered' ? T.answered : q.status === 'failed' ? T.failed : T.unfinished}</Text>
+          <Text>{T.asked}{q.question}</Text>
+          <Text>{q.status === 'answered' ? `${T.answer}${q.answer}` : q.error ?? T.notSaved}</Text>
+        </Box>)}
+        {side.text !== '' && <Text>{side.text}</Text>}
+        <Button key="side-hide" label="⌃" onPress={() => update($, sideView, () => null)} />
+      </Box>}
       {/* One cell in, as every text line under the buttons, so they start where the button text does. */}
       {status !== '' && (
         <Box flexDirection="row">
@@ -167,7 +207,7 @@ async function toolbar($: EngineInterface, e: ResolveInput, wrap: boolean): Prom
       {checking && (
         <Box flexDirection="row">
           <Box width={1} flexShrink={0} />
-          <Text dimColor>正在核对提交、推送、PR 和待办……</Text>
+          <Text dimColor>{T.checking}</Text>
         </Box>
       )}
       {(report ? [report] : []).map(r => (
@@ -192,9 +232,9 @@ async function toolbar($: EngineInterface, e: ResolveInput, wrap: boolean): Prom
             </Box>
           ))}
           <Box flexDirection="row" gap="sm" marginTop="sm">
-            {r.prompt !== '' && <Button key="closeout-go" label="接着做" onPress={() => void $.prompt.fill({ text: r.prompt, mode: 'replace' }).catch(() => {})} />}
-            <Button key="closeout-again" label="再查一次" onPress={() => runCloseout($)} />
-            <Button key="closeout-hide" label="收起" onPress={() => void update($, closeout, () => null).catch(() => {})} />
+            {r.prompt !== '' && <Button key="closeout-go" label={T.btnContinue} onPress={() => fillDraft($, r.prompt)} />}
+            <Button key="closeout-again" label={T.btnAgain} onPress={() => runCloseout($)} />
+            <Button key="closeout-hide" label={T.btnHide} onPress={() => void update($, closeout, () => null).catch(() => {})} />
           </Box>
         </Box>
       ))}
@@ -203,23 +243,86 @@ async function toolbar($: EngineInterface, e: ResolveInput, wrap: boolean): Prom
   return mine
 }
 
+async function runRewind($: EngineInterface, arg: string): Promise<string> {
+  const lang = await langFor($, setting)
+  if (branching) return t(lang).rewindBusy
+  branching = true
+  try {
+    if (!arg) {
+      const s = await selection($, lang)
+      await update($, rewindSelection, () => s)
+      await update($, conversationStatus, () => '')
+      return choiceText(s, lang)
+    }
+    const s = await read($, rewindSelection) ?? await selection($, lang)
+    const text = await branch($, s, /^\d+$/.test(arg) ? Number(arg) : NaN, lang)
+    await update($, rewindSelection, () => null)
+    await update($, conversationStatus, () => text)
+    return text
+  } catch (err) {
+    const text = t(lang).rewindFailed(err instanceof Error ? err.message : String(err))
+    await update($, conversationStatus, () => text)
+    return text
+  } finally { branching = false }
+}
+
+async function runSide($: EngineInterface, question: string): Promise<string> {
+  const lang = await langFor($, setting)
+  if (asking) return t(lang).asideBusy
+  asking = true
+  const show = (view: SideView) => update($, sideView, () => view).then(() => {})
+  try {
+    if (!question) {
+      const { value } = await history($, lang)
+      await show({ questions: value.questions, text: '', busy: false })
+      return historyText(value.questions, lang)
+    }
+    return await askSide($, question, show, lang)
+  } catch (err) {
+    const text = t(lang).asideFailed(err instanceof Error ? err.message : String(err))
+    await update($, sideView, previous => ({ questions: previous?.questions ?? [], text, busy: false }))
+    return text
+  } finally { asking = false }
+}
+
 // 进度: asks Claude, in Momo's words, for decisions waiting on her, what is done and what comes
 // next. The prompt runs as its own turn once the session is idle, so a busy session finishes first.
 // Not awaited: the submit settles only when its turn runs, which may be after the current one.
-function askProgress($: EngineInterface) {
-  $.ui.toast('正在发出进度请求；Claude 正在忙的话，会在忙完后回答')
-  void $.prompt.submit({ text: PROGRESS_PROMPT, asUser: true }).catch(() => $.ui.toast('没能发出进度请求，可以再点一次“进度”'))
+async function askProgress($: EngineInterface) {
+  const T = await textOf($)
+  $.ui.toast(T.progressToast)
+  void $.prompt.submit({ text: T.progressPrompt, asUser: true }).catch(() => $.ui.toast(T.progressFailed))
+}
+
+// Keep an unsent text draft. The mod API exposes text, not the composer's attachments.
+async function fillDraft($: EngineInterface, text: string) {
+  const T = await textOf($)
+  try {
+    const draft = await $.prompt.read()
+    if (draft.text === text) return
+    if (draft.text.trim()) {
+      $.ui.toast(T.draftPresent)
+      return
+    }
+    if (!(await $.prompt.fill({ text, mode: 'replace' })).isFilled) $.ui.toast(T.fillRefused)
+  } catch {
+    $.ui.toast(T.fillFailed)
+  }
 }
 
 // 收尾: runs the checks in closeout.ts (git, gh, the ledger; no model call) and shows the result
 // above the prompt, with 接着做 to put what is left in the prompt box, unsent.
 async function runCloseout($: EngineInterface) {
   if (await read($, closeoutBusy)) return
+  const lang = await langFor($, setting)
   await update($, closeoutBusy, () => true)
   await update($, closeout, () => null) // an earlier verdict never stands in for this one
   try {
     const cwd = await $.session.root() // the project folder; the session's own folder can fall back to where it started
-    const run = (argv: string[], init: { cwd: string; timeoutMs: number }) => $.process.run(argv, init).catch(() => null)
+    const run = async (argv: string[], init: { cwd: string; timeoutMs: number }) => {
+      const result = await $.process.run(argv, init).catch(() => null)
+      return result?.isStdoutTruncated || result?.isStderrTruncated ? null : result
+    }
     const readText = async (path: string): Promise<ReadResult> => {
       const exists = await $.fs.exists(path).catch(() => null)
       if (exists === null) return { kind: 'error' }
@@ -229,11 +332,11 @@ async function runCloseout($: EngineInterface) {
     }
     const facts = await gatherFacts(run, readText, cwd)
     const now = await $.clock.now()
-    await update($, closeout, () => judge(facts, now, new Date(now).toTimeString().slice(0, 5)))
+    await update($, closeout, () => judge(facts, now, new Date(now).toTimeString().slice(0, 5), lang))
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)
     const now = await $.clock.now().catch(() => 0)
-    await update($, closeout, () => ({ at: now, verdict: `❓ 收尾检查没完成：${why}。可以点“再查一次”`, items: [], prompt: '' }))
+    await update($, closeout, () => ({ at: now, verdict: t(lang).closeoutError(why), items: [], prompt: '' }))
   } finally {
     await update($, closeoutBusy, () => false)
   }
@@ -244,12 +347,14 @@ async function runCloseout($: EngineInterface) {
 // cache is never read.
 async function runHandoff($: EngineInterface) {
   const now = await $.clock.now()
-  await update($, handoff, () => ({ at: now, text: '正在整理交接说明……' }))
+  const lang = await langFor($, setting)
+  const T = t(lang)
+  await update($, handoff, () => ({ at: now, text: T.handoffPreparing }))
   try {
     // Windows always sets OS=Windows_NT; there HOME may be missing and USERPROFILE holds the home folder.
     const platform: Platform = (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT' ? 'windows' : 'mac'
     const home = (await $.env.get('HOME').catch(() => undefined)) || (await $.env.get('USERPROFILE').catch(() => undefined))
-    if (!home) throw new Error('找不到用户目录（HOME 和 USERPROFILE 都没有设置）')
+    if (!home) throw new Error(T.handoffNoHome)
     const root = await $.session.root() // the project folder; the session's own folder can fall back to where it started
     const sessionId = await $.session.id()
     const messages = await $.session.messages()
@@ -262,32 +367,38 @@ async function runHandoff($: EngineInterface) {
     const notePath = `${dir}/${noteName(cwd, now)}`
     const status = await $.process.run(['git', '-C', cwd, 'status', '--short', '--branch'], { timeoutMs: 10_000 }).catch(() => null)
     const last = status?.exitCode === 0 ? await $.process.run(['git', '-C', cwd, 'log', '-1', '--format=%h %s (%cr)'], { timeoutMs: 10_000 }).catch(() => null) : null
-    const ledgerPath = `${cwd}/OUTSTANDING.md`
-    const ledgerText = (await $.fs.exists(ledgerPath).catch(() => false)) ? await $.fs.read(ledgerPath).catch(() => '') : ''
+    const ledgers: { path: string; text: string }[] = []
+    for (const name of LEDGER_NAMES) {
+      const path = `${cwd}/${name}`
+      const exists = await $.fs.exists(path).catch(() => null)
+      if (exists === false) continue
+      const text = exists === null ? null : await $.fs.read(path).catch(() => null)
+      ledgers.push({ path, text: text === null ? T.ledgerUnreadable : text.trim() || T.ledgerEmpty })
+    }
     const { note, kickoff } = buildHandoff({
       messages,
       cwd,
       notePath,
       transcriptPath: transcript,
       git: status?.exitCode === 0 ? { status: status.stdout, lastCommit: last?.exitCode === 0 ? last.stdout : '' } : undefined,
-      ledger: ledgerText.trim() ? { path: ledgerPath, text: ledgerText } : undefined,
+      ledgers,
       now,
-    })
+    }, lang)
     await $.fs.write(notePath, note) // creates the folder as needed, on any system
-    const draft = prefill(kickoff, note, notePath, cwd)
+    const draft = prefill(kickoff, note, notePath, cwd, lang)
     const clip = clipboardCommand(platform)
     const copied = await $.process.run(clip.argv, { stdin: draft, ...(clip.env ? { env: clip.env } : {}), timeoutMs: 10_000 }).catch(() => null)
     const open = openCommand(platform, newSessionLink(draft, cwd))
     const opened = await $.process.run(open.argv, { ...(open.env ? { env: open.env } : {}), timeoutMs: 15_000 })
     if (opened.exitCode !== 0) {
-      throw new Error(`交接说明已保存，但没能打开新会话（${opened.stderr.trim() || '原因不明'}）${copied?.exitCode === 0 ? '；交接内容已复制，可以点“新会话”后粘贴' : ''}`)
+      throw new Error(T.openFailed(opened.stderr.trim() || T.unknownReason, copied?.exitCode === 0))
     }
-    const text = `✓ 已打开新会话并填好交接内容（约 ${Math.round(draft.length / 1000)}k 字），检查后按回车发送。${copied?.exitCode === 0 ? '剪贴板里也有一份备用。' : ''}`
+    const text = T.handoffOpened(Math.round(draft.length / 1000), copied?.exitCode === 0)
     await update($, handoff, () => ({ at: now, text }))
     $.ui.toast(text)
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err)
-    await update($, handoff, () => ({ at: now, text: `✗ 交接没完成：${why}。可以再点一次“交接”重试。` }))
+    await update($, handoff, () => ({ at: now, text: T.handoffFailed(why) }))
   }
 }
 

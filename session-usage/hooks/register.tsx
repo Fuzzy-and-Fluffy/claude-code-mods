@@ -8,6 +8,8 @@ import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register, RenderElement, RenderNode, Timer, TurnUsage } from 'claude-code'
 
 import type { CacheState, ContextReading, PaceBase, UsageSnapshot, UsageWindow } from '../types'
+import { detectLang, sliceLabel, t, windowLabel } from './i18n'
+import type { Lang } from './i18n'
 
 const BIG_CONTEXT = 100_000 // from here an expiring cache is worth a toast
 const FIVE_MIN = 5 * 60_000
@@ -19,20 +21,7 @@ const EXPIRY_WARN_MS = 5 * 60_000 // how long before the cache expires the toast
 const PACE_MIN_MS = 10 * 60_000 // the shortest stretch a pace estimate is drawn from
 const LABEL_GAP = 2 // cells between the longest label and the number column
 const VALUE_CELLS = 9 // its number column, left-aligned like the others so each column starts on one line; fits $1000.00
-// 周额度 rather than 7d: a digit's own side space set it off from the Chinese labels below it.
-const WINDOW_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '周额度', spend_limit: '花费上限' }
 const ORDER = ['five_hour', 'seven_day', 'spend_limit']
-const SLICE_NAMES: Record<string, string> = {
-  'system prompt': '系统提示词',
-  'system tools': '系统工具',
-  'mcp tools': 'MCP 工具',
-  'mcp server instructions': 'MCP 说明',
-  'custom agents': '自定义代理',
-  'memory files': '记忆文件',
-  skills: '技能',
-  messages: '对话消息',
-}
-
 // Held by the host, so they survive a hot reload of this file.
 const usage = atom({ plugin: 'session-usage', key: 'usage' } as const, null as UsageSnapshot | null)
 const ctx = atom({ plugin: 'session-usage', key: 'ctx' } as const, null as ContextReading | null)
@@ -43,7 +32,16 @@ const warned = atom({ plugin: 'session-usage', key: 'warned' } as const, {} as R
 const pace = atom({ plugin: 'session-usage', key: 'pace' } as const, {} as Record<string, PaceBase>)
 const expiryWarned = atom({ plugin: 'session-usage', key: 'expiryWarned' } as const, 0)
 
-export const register: Register = on => {
+// The language is detected once per load, on first use.
+let setting: unknown
+let detected: Promise<Lang> | undefined
+function langOf($: EngineInterface) {
+  return (detected ??= detectLang($, setting))
+}
+
+export const register: Register = (on, options) => {
+  setting = options.language
+  detected = undefined
   let timer: Timer | undefined // one countdown timer, even if session.start fires again
   let steppedTurn: string | undefined // the main-loop turn whose steps already moved the countdown
 
@@ -57,18 +55,18 @@ export const register: Register = on => {
         const c = await read($, cache)
         const now = await $.clock.now()
         if (c && c.tokens > 0 && c.at + c.ttlMs + TICK_MS > now) await update($, tick, n => n + 1)
-        await warnExpiry($, c, now)
+        await warnExpiry($, c, now, await langOf($))
       })().catch(() => {})
     })
     const u = await $.session.usage().catch(() => null)
-    if (u) await take($, u.rateLimits, u.cost?.usd).catch(() => {})
+    if (u) await take($, u.rateLimits, u.cost?.usd, await langOf($)).catch(() => {})
     void refresh($).catch(() => {})
     return r
   })
 
   on('session.measure', async ($, e, next) => {
     const r = await next(e)
-    await take($, e.rateLimits, e.cost?.usd).catch(() => {})
+    await take($, e.rateLimits, e.cost?.usd, await langOf($)).catch(() => {})
     return r
   })
 
@@ -107,16 +105,18 @@ export const register: Register = on => {
     await read($, tick) // redraws on each tick of the cache countdown
     const c = await read($, cache)
     const now = await $.clock.now()
+    const L = t(await langOf($))
     const { Box, Button, Text } = $.ui.resolve(e)
     // One short plain label: the footer slot is narrow, and separate pills cut it off sooner.
     // A click opens the details above the prompt; another click folds them.
     // Context and cache only: plans lost the five-hour window (2026-11-01) and the app's own ring shows the
     // weekly one; a click opens every window in the details.
-    const label = [`上下文 ${pct(reading?.percent)}`, `缓存 ${cacheShort(c, now)}`].join(' | ')
+    const label = [`${L.context} ${pct(reading?.percent)}`, `${L.cache} ${cacheShort(c, now, await langOf($))}`].join(' | ')
+    const expiring = !!c && c.tokens > 0 && c.at + c.ttlMs - now > 0 && c.at + c.ttlMs - now <= EXPIRY_WARN_MS
     return (
       <Box flexDirection="row" gap="md">
         {e.props.modes.length > 0 && <Text dimColor>{e.props.modes.join(' & ')}</Text>}
-        <Button key="usage" plain label={label} onPress={() => toggle($)} />
+        <Button key="usage" plain label={label} onPress={() => toggle($)}><Text>{`${L.context} ${pct(reading?.percent)} | `}</Text><Text color={expiring ? 'warning' : undefined}>{`${L.cache} ${cacheShort(c, now, await langOf($))}`}</Text></Button>
       </Box>
     )
   })
@@ -132,9 +132,9 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const { Box, Text } = $.ui.resolve(e)
     // The details card, as a list of one so the tree keeps the array shape the desktop draws.
-    const rows = detailRows(snap, c, reading, now, await read($, pace))
+    const rows = detailRows(snap, c, reading, now, await read($, pace), await langOf($))
     const cards = [rows]
-    const labelCells = Math.max(...rows.map(r => cells(r.label))) + LABEL_GAP // fits 花费上限 as well as 周额度
+    const labelCells = Math.max(...rows.map(r => cells(r.label))) + LABEL_GAP // fits the longest label
     const mine = (
       <Box key="momo-band-3-usage" flexDirection="column">
         {cards.map(rows => (
@@ -169,14 +169,14 @@ async function toggle($: EngineInterface) {
   if (now) await refresh($).catch(() => {})
 }
 
-async function take($: EngineInterface, rateLimits: readonly UsageWindow[], costUsd: number | undefined) {
+async function take($: EngineInterface, rateLimits: readonly UsageWindow[], costUsd: number | undefined, lang: Lang) {
   const windows = rateLimits
     .filter(w => Number.isFinite(w.percentUsed))
     .map(w => ({ kind: w.kind, percentUsed: w.percentUsed, resetsAt: w.resetsAt }))
   const now = await $.clock.now()
   await update($, usage, () => ({ rateLimits: windows, costUsd, at: now }))
   await update($, pace, old => nextBases(old, windows, now))
-  await warn($, windows)
+  await warn($, windows, lang)
 }
 
 // Asks the engine for /context's breakdown, estimated locally (no token-count calls).
@@ -198,7 +198,7 @@ async function refresh($: EngineInterface) {
 }
 
 // One toast per window per reset period, once it passes WARN_AT.
-async function warn($: EngineInterface, windows: UsageWindow[]) {
+async function warn($: EngineInterface, windows: UsageWindow[], lang: Lang) {
   const done = await read($, warned)
   const now = await $.clock.now()
   const fresh: Record<string, number> = {}
@@ -208,8 +208,7 @@ async function warn($: EngineInterface, windows: UsageWindow[]) {
     const last = done[w.kind]
     if (last !== undefined && resetMs <= last + 30 * 60_000) continue // a reset time that moved on by more than half an hour is a new period
     fresh[w.kind] = resetMs
-    const when = resetMs > 0 ? `，${countdown(resetMs - now)} 后重置` : ''
-    $.ui.toast(`${quotaName(w.kind)}已用 ${Math.round(w.percentUsed)}%${when}`)
+    $.ui.toast(t(lang).quotaToast(quotaName(w.kind, lang), Math.round(w.percentUsed), resetMs > 0 ? t(lang).resetsIn(countdown(resetMs - now)) : ''))
   }
   if (Object.keys(fresh).length > 0) await update($, warned, old => ({ ...old, ...fresh }))
 }
@@ -241,36 +240,37 @@ function windowPct(snap: UsageSnapshot | null, kind: string) {
 }
 
 // The footer's word for the cache: minutes left, 已过期, or — before the first reply.
-export function cacheShort(c: CacheState | null, now: number) {
+export function cacheShort(c: CacheState | null, now: number, lang: Lang = 'zh') {
   if (!c) return '—'
-  if (c.tokens === 0) return '未用'
+  if (c.tokens === 0) return t(lang).cacheUnused
   const left = c.at + c.ttlMs - now
-  return left > 0 ? `${Math.max(1, Math.ceil(left / 60_000))}m` : '已过期'
+  return left > 0 ? `${Math.max(1, Math.ceil(left / 60_000))}m` : t(lang).cacheExpired
 }
 
 // One row per window, then context, cache and this session: a short label, a number and a note,
 // laid out in three aligned columns.
 export type DetailRow = { label: string; value: string; note: string }
 
-export function detailRows(snap: UsageSnapshot | null, c: CacheState | null, reading: ContextReading | null, now: number, bases: Record<string, PaceBase> = {}): DetailRow[] {
+export function detailRows(snap: UsageSnapshot | null, c: CacheState | null, reading: ContextReading | null, now: number, bases: Record<string, PaceBase> = {}, lang: Lang = 'zh'): DetailRow[] {
+  const L = t(lang)
   const rows: DetailRow[] = (snap?.rateLimits ?? [])
     .filter(w => !(resetTime(w) > 0 && resetTime(w) <= now)) // a window past its reset waits for a fresh reading
     .sort((a, b) => rank(a.kind) - rank(b.kind))
     .map(w => {
       const resetMs = resetTime(w)
-      const reset = resetMs > 0 ? `${countdown(resetMs - now)} 后重置` : ''
-      const out = paceOut(bases[w.kind], w, snap?.at ?? now, now)
-      return { label: windowName(w.kind), value: `${Math.round(w.percentUsed)}%`, note: [reset, out].filter(Boolean).join(' · ') }
+      const reset = resetMs > 0 ? L.resetsIn(countdown(resetMs - now)) : ''
+      const out = paceOut(bases[w.kind], w, snap?.at ?? now, now, lang)
+      return { label: windowName(w.kind, lang), value: `${Math.round(w.percentUsed)}%`, note: [reset, out].filter(Boolean).join(' · ') }
     })
-  if (rows.length === 0) rows.push({ label: '额度', value: '—', note: '回复一次后出现' })
+  if (rows.length === 0) rows.push({ label: L.quota, value: '—', note: L.appearsAfterReply })
   if (reading) {
-    const compacts = reading.compactsAt ? ` · 到 ${tokens(reading.compactsAt)} 自动压缩` : ''
-    rows.push({ label: '上下文', value: `${reading.percent}%`, note: `${tokens(reading.total)} / ${tokens(reading.window)}${compacts}` })
-  } else rows.push({ label: '上下文', value: '—', note: '暂无数据' })
-  rows.push({ label: '缓存', value: cacheShort(c, now), note: cacheNote(c, reading, now) })
+    const compacts = reading.compactsAt ? L.compactsAt(tokens(reading.compactsAt)) : ''
+    rows.push({ label: L.context, value: `${reading.percent}%`, note: `${tokens(reading.total)} / ${tokens(reading.window)}${compacts}` })
+  } else rows.push({ label: L.context, value: '—', note: L.noData })
+  rows.push({ label: L.cache, value: cacheShort(c, now, lang), note: cacheNote(c, reading, now, lang) })
   const cost = snap?.costUsd !== undefined && snap.costUsd > 0 ? `$${snap.costUsd.toFixed(2)}` : '—'
-  const slices = reading ? reading.slices.slice(0, TOP_SLICES).map(s => `${SLICE_NAMES[s.name] ?? s.name} ${tokens(s.tokens)}`).join(' · ') : ''
-  rows.push({ label: '本次', value: cost, note: slices })
+  const slices = reading ? reading.slices.slice(0, TOP_SLICES).map(s => `${sliceLabel(lang, s.name)} ${tokens(s.tokens)}`).join(' · ') : ''
+  rows.push({ label: L.session, value: cost, note: slices })
   return rows
 }
 
@@ -296,30 +296,31 @@ export function nextBases(old: Record<string, PaceBase>, windows: readonly Usage
 
 // The rate runs from the period's first reading to the latest one (`sampledAt`), so time passing
 // with no new reading does not dilute it.
-export function paceOut(base: PaceBase | undefined, w: UsageWindow, sampledAt: number, now: number) {
+export function paceOut(base: PaceBase | undefined, w: UsageWindow, sampledAt: number, now: number, lang: Lang = 'zh') {
   if (!base || sampledAt - base.at < PACE_MIN_MS || w.percentUsed <= base.pct) return ''
   const perMs = (w.percentUsed - base.pct) / (sampledAt - base.at)
   const runsOutAt = sampledAt + (100 - w.percentUsed) / perMs
   const resetMs = resetTime(w)
   if (runsOutAt <= now || (resetMs > 0 && runsOutAt >= resetMs)) return ''
-  return `按现在速度约 ${countdown(runsOutAt - now)} 后用完`
+  return t(lang).runsOutIn(countdown(runsOutAt - now))
 }
 
 // One toast per cached response, a few minutes before a large conversation's cache expires.
-async function warnExpiry($: EngineInterface, c: CacheState | null, now: number) {
+async function warnExpiry($: EngineInterface, c: CacheState | null, now: number, lang: Lang) {
   if (!c || c.tokens < BIG_CONTEXT) return
   const left = c.at + c.ttlMs - now
   if (left <= 0 || left > EXPIRY_WARN_MS || (await read($, expiryWarned)) === c.at) return
   await update($, expiryWarned, () => c.at)
-  $.ui.toast(`缓存约 ${countdown(left)} 后过期。要离开一会儿的话，先交接或收尾更省额度`)
+  $.ui.toast(t(lang).expiryToast(countdown(left)))
 }
 
-function cacheNote(c: CacheState | null, reading: ContextReading | null, now: number) {
-  if (!c) return '回复一次后出现'
-  if (c.tokens === 0) return '上一次回复没有用到缓存'
+function cacheNote(c: CacheState | null, reading: ContextReading | null, now: number, lang: Lang) {
+  const L = t(lang)
+  if (!c) return L.appearsAfterReply
+  if (c.tokens === 0) return L.cacheNotUsed
   const left = c.at + c.ttlMs - now
-  if (left > 0) return `有效期 ${c.ttlMs >= HOUR ? '1h' : '5m'}，每次回复后重新计时 · 已缓存 ${tokens(c.tokens)}` // the value column holds the minutes left
-  return `下一条消息要重新读取约 ${reading ? tokens(reading.total) : tokens(c.tokens)}，会多用一些额度`
+  if (left > 0) return L.cacheValid(c.ttlMs >= HOUR ? '1h' : '5m', tokens(c.tokens)) // the value column holds the minutes left
+  return L.cacheRead(reading ? tokens(reading.total) : tokens(c.tokens))
 }
 
 export function countdown(ms: number) {
@@ -348,14 +349,13 @@ export function cells(text: string) {
   return [...text].reduce((n, ch) => n + (/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1), 0)
 }
 
-function windowName(kind: string) {
-  return WINDOW_NAMES[kind] ?? kind.replace(/_/g, ' ')
+function windowName(kind: string, lang: Lang) {
+  return windowLabel(lang, kind)
 }
 
 // The window's name as a toast says it: 周额度, 5h 额度, 花费上限.
-function quotaName(kind: string) {
-  const name = windowName(kind)
-  return /(额度|上限)$/.test(name) ? name : `${name} 额度`
+function quotaName(kind: string, lang: Lang) {
+  return t(lang).quotaName(windowName(kind, lang))
 }
 
 function rank(kind: string) {

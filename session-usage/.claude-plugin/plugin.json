@@ -1,6 +1,6 @@
 {
   "name": "session-usage",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "description": "Plan usage, prompt cache and context in the prompt footer; a click opens the details above the prompt.",
   "author": {
     "name": "Momo Wonders",
@@ -9,5 +9,18 @@
   "homepage": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
   "repository": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language / 语言",
+      "description": "auto follows the system language (Chinese if it starts with zh, otherwise English); zh or en forces one.",
+      "options": [
+        "auto",
+        "zh",
+        "en"
+      ],
+      "default": "auto"
+    }
+  }
 }

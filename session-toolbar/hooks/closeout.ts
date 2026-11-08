@@ -5,6 +5,8 @@
 //   as unknown with what was seen, never as done; so is every lookup that failed.
 
 import type { CloseoutItem, CloseoutReport } from '../types'
+import { OPEN_SECTION, OPEN_SECTION_ZH, t } from './i18n'
+import type { Lang } from './i18n'
 
 export type Run = (argv: string[], init: { cwd: string; timeoutMs: number }) => Promise<{ exitCode: number; stdout: string; stderr: string } | null>
 export type ReadResult = { kind: 'missing' } | { kind: 'error' } | { kind: 'text'; text: string }
@@ -40,6 +42,7 @@ const QUICK = 10_000
 const NETWORK = 20_000
 const MAX_WORKTREES = 12
 const MAX_RUNS = 100 // a full page of CI runs may hide more: then the CI reads as unknown
+export const LEDGER_NAMES = ['OUTSTANDING.md', 'ACTIVE-WORK.md', 'HANDOVER.md'] as const
 
 export async function gatherFacts(run: Run, read: ReadText, cwd: string): Promise<CloseoutFacts> {
   const git = (args: string[], timeoutMs = QUICK, at = cwd) => run(['git', '-C', at, ...args], { cwd: at, timeoutMs })
@@ -69,6 +72,13 @@ export async function gatherFacts(run: Run, read: ReadText, cwd: string): Promis
   const top = await git(['rev-parse', '--show-toplevel'])
   if (top?.exitCode === 0) facts.top = top.stdout.trim()
   else if (!top || !/not a git repository/i.test(top.stderr)) facts.gitFailed = true
+  const readLedgers = async () => {
+    for (const path of [...new Set([cwd, ...(facts.top ? [facts.top] : [])])].flatMap(dir => LEDGER_NAMES.map(name => `${dir}/${name}`))) {
+      const r = await read(path)
+      if (r.kind === 'text') facts.ledgers.push({ path, open: openItems(r.text), readable: true })
+      else if (r.kind === 'error') facts.ledgers.push({ path, open: 0, readable: false })
+    }
+  }
 
   if (facts.top) {
     const status = await git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'])
@@ -79,6 +89,19 @@ export async function gatherFacts(run: Run, read: ReadText, cwd: string): Promis
     }
     const head = await git(['rev-parse', 'HEAD'])
     if (head?.exitCode === 0) facts.head = head.stdout.trim()
+    // Compare contents too: a dirty file can change without changing the status or file count.
+    // Read-only hash-object (no -w) includes new files; failed/truncated evidence never passes.
+    const contents = async (): Promise<string | null> => {
+      const diff = await git(['diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD', '--'], QUICK, facts.top!)
+      const files = await git(['ls-files', '--others', '--exclude-standard', '-z'], QUICK, facts.top!)
+      if (diff?.exitCode !== 0 || files?.exitCode !== 0) return null
+      const paths = files.stdout.split('\0').filter(Boolean)
+      if (paths.length > 200) return null // bound argv and work; an incomplete snapshot refuses
+      const hashes = paths.length ? await git(['hash-object', '--no-filters', '--', ...paths], QUICK, facts.top!) : null
+      if (paths.length && (hashes?.exitCode !== 0 || hashes.stdout.trim().split('\n').length !== paths.length)) return null
+      return JSON.stringify([diff.stdout, files.stdout, hashes?.stdout ?? ''])
+    }
+    const before = await contents()
     const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD'])
     if (branch?.exitCode === 0 && branch.stdout.trim() !== 'HEAD') facts.branch = branch.stdout.trim()
     const shallow = await git(['rev-parse', '--is-shallow-repository'])
@@ -163,21 +186,13 @@ export async function gatherFacts(run: Run, read: ReadText, cwd: string): Promis
       if (pr?.exitCode === 0) facts.pr = prNote(pr.stdout)
       else if (pr && /no pull requests found/i.test(pr.stderr)) facts.pr = 'none'
     }
-  }
-
-  if (facts.top) {
+    await readLedgers()
     // The answers above must describe one state: if HEAD or the working tree moved meanwhile, none counts.
     const headAfter = await git(['rev-parse', 'HEAD'])
     const statusAfter = await git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'])
-    const dirtyAfter = statusAfter?.exitCode === 0 ? statusAfter.stdout.split('\n').filter(Boolean).length : null
-    facts.changedDuring = headAfter?.exitCode !== 0 || headAfter.stdout.trim() !== facts.head || dirtyAfter !== (facts.changed ?? -1) + (facts.untracked ?? 0)
-  }
-
-  for (const path of [...new Set([`${cwd}/OUTSTANDING.md`, ...(facts.top ? [`${facts.top}/OUTSTANDING.md`] : [])])]) {
-    const r = await read(path)
-    if (r.kind === 'text') facts.ledgers.push({ path, open: openItems(r.text), readable: true })
-    else if (r.kind === 'error') facts.ledgers.push({ path, open: 0, readable: false })
-  }
+    const after = await contents()
+    facts.changedDuring = headAfter?.exitCode !== 0 || headAfter.stdout.trim() !== facts.head || status?.exitCode !== 0 || statusAfter?.exitCode !== 0 || statusAfter.stdout !== status.stdout || before === null || after === null || before !== after
+  } else await readLedgers()
   return facts
 }
 
@@ -222,7 +237,7 @@ export function openItems(text: string): number {
       count++
       continue
     }
-    if (/^(#+\s*)?(open|remaining|outstanding items|todo|to do|待办|未完成|还没做|剩下)\b/i.test(line.trim()) || /^(#+\s*)?(待办|未完成|还没做|剩下)/.test(line.trim())) {
+    if (OPEN_SECTION.test(line.trim()) || OPEN_SECTION_ZH.test(line.trim())) {
       inOpen = true
       continue
     }
@@ -232,82 +247,84 @@ export function openItems(text: string): number {
   return count
 }
 
-export function judge(f: CloseoutFacts, at: number, time: string): CloseoutReport {
+export function judge(f: CloseoutFacts, at: number, time: string, lang: Lang = 'zh'): CloseoutReport {
+  const C = t(lang).closeout
   const items: CloseoutItem[] = []
-  if (f.gitFailed) items.push({ state: 'unknown', label: '代码', note: '没能用 git 读这个文件夹，查不了提交和推送' })
+  if (f.gitFailed) items.push({ state: 'unknown', label: C.code, note: C.gitFailed })
   if (f.top) {
-    const stale = f.fetched ? '' : '（没能联网更新，按本机记录判断）'
-    if (f.changed === null || f.untracked === null) items.push({ state: 'unknown', label: '提交', note: '没读到改动情况' })
-    else if (f.changed + f.untracked === 0) items.push({ state: 'done', label: '提交', note: '没有没提交的改动' })
-    else items.push({ state: 'missing', label: '提交', note: `有 ${f.changed + f.untracked} 个文件还没提交${f.untracked > 0 ? `（其中 ${f.untracked} 个是新文件）` : ''}` })
+    const stale = f.fetched ? '' : C.stale
+    if (f.changed === null || f.untracked === null) items.push({ state: 'unknown', label: C.commit, note: C.noChanges })
+    else if (f.changed + f.untracked === 0) items.push({ state: 'done', label: C.commit, note: C.clean })
+    else items.push({ state: 'missing', label: C.commit, note: C.uncommitted(f.changed + f.untracked, f.untracked) })
 
     const dirty = f.otherWorktrees.filter(w => w.dirty !== null && w.dirty > 0)
     const unread = f.otherWorktrees.filter(w => w.dirty === null).length + (f.worktreesUnchecked ?? 0)
-    if (dirty.length > 0) items.push({ state: 'missing', label: '其他目录', note: `这个项目另有 ${dirty.length} 个工作目录有没提交的改动：${dirty.map(w => w.path.split('/').pop()).join('、')}` })
-    if (f.worktreesUnchecked === null) items.push({ state: 'unknown', label: '其他目录', note: '没读到这个项目的其他工作目录' })
-    else if (unread > 0) items.push({ state: 'unknown', label: '其他目录', note: `有 ${unread} 个工作目录没查到状态` })
+    if (dirty.length > 0) items.push({ state: 'missing', label: C.others, note: C.dirtyOthers(dirty.map(w => w.path.split('/').pop() ?? '')) })
+    if (f.worktreesUnchecked === null) items.push({ state: 'unknown', label: C.others, note: C.noWorktrees })
+    else if (unread > 0) items.push({ state: 'unknown', label: C.others, note: C.unreadWorktrees(unread) })
 
-    if (f.stashes === null) items.push({ state: 'unknown', label: '暂存', note: '没读到暂存（stash）列表' })
-    else if (f.stashes > 0) items.push({ state: 'missing', label: '暂存', note: `有 ${f.stashes} 份暂存（stash）的改动还没处理` })
+    if (f.stashes === null) items.push({ state: 'unknown', label: C.stash, note: C.noStash })
+    else if (f.stashes > 0) items.push({ state: 'missing', label: C.stash, note: C.stashes(f.stashes) })
 
     const cut = f.shallow !== false // a shallow clone, or one not known to be whole, cannot prove a commit is absent
-    if (f.hasRemote === false) items.push({ state: 'unknown', label: '推送', note: '这个项目没有远程仓库，只存在这台电脑上' })
-    else if (f.hasRemote === null || f.remoteHolds === null) items.push({ state: 'unknown', label: '推送', note: '没法判断有没有推送到远程' })
-    else if (f.remoteHolds.length === 0 && cut) items.push({ state: 'unknown', label: '推送', note: '这是浅克隆，历史不全，没法核对推送' })
-    else if (f.remoteHolds.length === 0) items.push({ state: f.fetched ? 'missing' : 'unknown', label: '推送', note: `最新的提交还没推送到远程${stale}` })
-    else items.push({ state: f.fetched ? 'done' : 'unknown', label: '推送', note: `远程已有最新提交（${f.remoteHolds[0]?.replace(/^refs\/remotes\//, '')}）${stale}` })
+    if (f.hasRemote === false) items.push({ state: 'unknown', label: C.push, note: C.noRemote })
+    else if (f.hasRemote === null || f.remoteHolds === null) items.push({ state: 'unknown', label: C.push, note: C.pushUnknown })
+    else if (f.remoteHolds.length === 0 && cut) items.push({ state: 'unknown', label: C.push, note: C.pushShallow })
+    else if (f.remoteHolds.length === 0) items.push({ state: f.fetched ? 'missing' : 'unknown', label: C.push, note: C.notPushed(stale) })
+    else items.push({ state: f.fetched ? 'done' : 'unknown', label: C.push, note: C.pushed(f.remoteHolds[0]?.replace(/^refs\/remotes\//, ''), stale) })
 
     if (f.hasRemote) {
-      const main = f.defaultBranch?.replace(/^origin\//, '') ?? '主分支'
-      const pr = f.pr && f.pr !== 'none' ? `；PR #${f.pr.number} ${f.pr.state === 'MERGED' ? '显示已合并' : f.pr.state === 'CLOSED' ? '已关闭' : '还开着'}` : ''
-      if (f.merged === null) items.push({ state: 'unknown', label: '合并', note: `没法判断有没有合并进 ${main}${pr}` })
-      else if (f.merged && f.fetched) items.push({ state: 'done', label: '合并', note: `已合并进 ${main}` })
-      else if (f.merged) items.push({ state: 'unknown', label: '合并', note: `按本机记录已合并进 ${main}${stale}` })
+      const main = f.defaultBranch?.replace(/^origin\//, '') ?? C.mainBranch
+      const pr = f.pr && f.pr !== 'none' ? C.prNote(f.pr.number, f.pr.state) : ''
+      if (f.merged === null) items.push({ state: 'unknown', label: C.merge, note: C.mergeUnknown(main, pr) })
+      else if (f.merged && f.fetched) items.push({ state: 'done', label: C.merge, note: C.merged(main) })
+      else if (f.merged) items.push({ state: 'unknown', label: C.merge, note: C.mergedLocal(main, stale) })
       else if (f.pr && f.pr !== 'none' && f.pr.state === 'MERGED' && f.pr.head === f.head && `origin/${f.pr.base}` === f.defaultBranch) {
-        items.push({ state: 'unknown', label: '合并', note: `PR #${f.pr.number} 显示已合并进 ${main}，但多半是压缩合并，没法按提交核对` })
-      } else if (cut) items.push({ state: 'unknown', label: '合并', note: `这是浅克隆，历史不全，没法核对有没有合并进 ${main}` })
-      else items.push({ state: f.fetched ? 'missing' : 'unknown', label: '合并', note: `最新的提交还没合并进 ${main}${pr || (f.pr === 'none' ? '；还没开 PR' : '')}${stale}` })
+        items.push({ state: 'unknown', label: C.merge, note: C.squashed(f.pr.number, main) })
+      } else if (cut) items.push({ state: 'unknown', label: C.merge, note: C.mergeShallow(main) })
+      else items.push({ state: f.fetched ? 'missing' : 'unknown', label: C.merge, note: C.notMerged(main, pr || (f.pr === 'none' ? C.noPr : ''), stale) })
     }
 
-    if (f.hasRemote && !f.onGitHub) items.push({ state: 'unknown', label: '检查', note: '不是 GitHub 仓库，没查自动检查' })
+    if (f.hasRemote && !f.onGitHub) items.push({ state: 'unknown', label: C.ci, note: C.notGitHub })
     if (f.onGitHub) {
-      if (f.ci === null) items.push({ state: 'unknown', label: '检查', note: '没法查全自动检查（gh 没装好、没登录、没联网，或运行记录太多）' })
-      else if (f.ci.fail > 0) items.push({ state: 'missing', label: '检查', note: `最新提交有 ${f.ci.fail} 项自动检查没通过` })
-      else if (f.ci.pending > 0) items.push({ state: 'unknown', label: '检查', note: `最新提交还有 ${f.ci.pending} 项自动检查在跑` })
-      else if (f.ci.other > 0) items.push({ state: 'unknown', label: '检查', note: `最新提交有 ${f.ci.other} 项自动检查被跳过，没法确认全部通过` })
-      else if (f.ci.pass > 0) items.push({ state: 'done', label: '检查', note: `最新提交的 ${f.ci.pass} 项自动检查都通过了` })
-      else items.push({ state: 'unknown', label: '检查', note: '最新提交没有自动检查结果（只看 GitHub Actions）' })
+      if (f.ci === null) items.push({ state: 'unknown', label: C.ci, note: C.ciUnknown })
+      else if (f.ci.fail > 0) items.push({ state: 'missing', label: C.ci, note: C.ciFailed(f.ci.fail) })
+      else if (f.ci.pending > 0) items.push({ state: 'unknown', label: C.ci, note: C.ciPending(f.ci.pending) })
+      else if (f.ci.other > 0) items.push({ state: 'unknown', label: C.ci, note: C.ciSkipped(f.ci.other) })
+      else if (f.ci.pass > 0) items.push({ state: 'done', label: C.ci, note: C.ciPassed(f.ci.pass) })
+      else items.push({ state: 'unknown', label: C.ci, note: C.ciNone })
     }
+    items.push({ state: 'unknown', label: C.deliver, note: C.delivery })
   }
   for (const l of f.ledgers) {
     const name = l.path.split('/').slice(-2).join('/')
-    if (!l.readable) items.push({ state: 'unknown', label: '待办', note: `${name} 读不了，请打开看看` })
-    else if (l.open > 0) items.push({ state: 'missing', label: '待办', note: `${name} 里至少还有 ${l.open} 项没做完` })
-    else items.push({ state: 'unknown', label: '待办', note: `${name} 还在，没看出未完成项，请打开确认都做完了` })
+    if (!l.readable) items.push({ state: 'unknown', label: C.ledger, note: C.ledgerUnreadable(name) })
+    else if (l.open > 0) items.push({ state: 'missing', label: C.ledger, note: C.ledgerOpen(name, l.open) })
+    else items.push({ state: 'unknown', label: C.ledger, note: C.ledgerNone(name) })
   }
   if (f.changedDuring) {
     // Evidence about a commit that is no longer HEAD proves nothing: no item of this run stays done.
     for (const item of items) if (item.state === 'done') item.state = 'unknown'
-    items.unshift({ state: 'unknown', label: '变动', note: '检查期间代码有变动，这次结果不作数，请再查一次' })
+    items.unshift({ state: 'unknown', label: C.moved, note: C.changedDuring })
   }
-  if (!f.top && !f.gitFailed && f.ledgers.length === 0) items.push({ state: 'unknown', label: '范围', note: '这个文件夹不是 git 仓库，也没有待办记录，没什么可查' })
+  if (!f.top && !f.gitFailed && f.ledgers.length === 0) items.push({ state: 'unknown', label: C.scope, note: C.nothing })
 
   const missing = items.filter(i => i.state === 'missing').length
   const unknown = items.filter(i => i.state === 'unknown').length
   const verdict =
     missing > 0
-      ? `⛔ 还不能收尾：还差 ${missing} 项${unknown > 0 ? `，另有 ${unknown} 项没法核实` : ''}（${time} 核对）`
+      ? C.verdictMissing(missing, unknown, time)
       : unknown > 0
-        ? `❓ 暂时没法确认：有 ${unknown} 项没法核实（${time} 核对）`
-        : `✅ 可以收尾：每一项都有证据（${time} 核对）`
+        ? C.verdictUnknown(unknown, time)
+        : C.verdictDone(time)
   const open = items.filter(i => i.state !== 'done')
   const prompt =
     open.length === 0
       ? ''
       : [
-          `请帮我把收尾做完。收尾检查（本机脚本，${time}）发现：`,
-          ...open.map(i => `- ${i.state === 'missing' ? '还差' : '没法核实'}·${i.label}：${i.note}`),
-          '请逐项处理：按项目的规矩完成还差的步骤；没法核实的先查清原因。需要我决定的先问我。做完后我会再点一次“收尾”核对。',
+          C.promptHead(time),
+          ...open.map(i => C.promptItem(i.state === 'missing', i.label, i.note)),
+          ...C.promptBody,
         ].join('\n')
   return { at, verdict, items, prompt }
 }

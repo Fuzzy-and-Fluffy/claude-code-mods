@@ -1,7 +1,7 @@
 {
   "name": "session-toolbar",
-  "version": "0.5.12",
-  "description": "A row of quick buttons above the prompt: 进度, 交接 (handoff without a model call), 压缩, 撤回, 旁问 and 收尾 (closeout check).",
+  "version": "0.6.0",
+  "description": "A row of quick buttons above the prompt: Progress, Handoff (without a model call), Compact, Rewind, Aside and Closeout (closeout check). Shown in Chinese or English, following the system language.",
   "author": {
     "name": "Momo Wonders",
     "email": "hello@wondering.works"
@@ -9,5 +9,14 @@
   "homepage": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
   "repository": "https://github.com/Fuzzy-and-Fluffy/claude-code-mods",
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language / 语言",
+      "description": "auto follows the system language (Chinese if it starts with zh, otherwise English); zh or en forces one.",
+      "options": ["auto", "zh", "en"],
+      "default": "auto"
+    }
+  }
 }

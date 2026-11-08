@@ -1,4 +1,6 @@
 import type { WatchedAgent } from '../types'
+import { t } from './i18n'
+import type { Lang } from './i18n'
 
 // Codex runs started from this chat through Bash (`codex exec`, lane scripts, the companion) are no
 // sub-agents of the engine: agent.list never holds them. Codex writes each run to its own record,
@@ -20,8 +22,8 @@ export type CodexRecord = {
 }
 
 export const MAX_READ = 4 * 1024 * 1024 - 1 // $.fs.read rejects anything larger
-const STALE_MS = 15 * 60_000 // no write for this long and no end: the run is gone, how it ended unknown
 export const DAY_MS = 86_400_000
+const STALE_MS = 15 * 60_000
 
 export function mentionsCodex(command: string) {
   return /\bcodex\b|codex_lanes/i.test(command)
@@ -88,12 +90,12 @@ export function parseCodex(text: string, whole: boolean): CodexRecord | undefine
   return { ...meta, prompt, model, steps: whole ? steps : undefined, latest, state, endedAt }
 }
 
-export function codexRow(r: CodexRecord, mtimeMs: number, current: number | undefined): WatchedAgent {
-  const stale = r.state === 'running' && current !== undefined && current - mtimeMs > STALE_MS
+export function codexRow(r: CodexRecord, mtimeMs: number, current: number, lang: Lang = 'zh'): WatchedAgent {
+  const endUnknown = r.state === 'running' && current - mtimeMs >= STALE_MS
   return {
-    id: `codex:${r.id}`, description: r.prompt || 'Codex 任务', type: 'Codex', model: r.model, parentId: r.parentId,
-    status: stale ? 'completed' : r.state, startedAt: r.startedAt, endedAt: stale ? mtimeMs : r.endedAt,
-    ...(stale ? { endUnknown: true as const } : {}),
+    id: `codex:${r.id}`, description: r.prompt || t(lang).codexTask, type: 'Codex', model: r.model, parentId: r.parentId,
+    status: endUnknown ? 'completed' : r.state, startedAt: r.startedAt, lastActivityAt: mtimeMs,
+    endedAt: endUnknown ? mtimeMs : r.endedAt, ...(endUnknown ? { endUnknown: true as const } : {}),
     steps: r.steps ?? -1, latest: r.latest, tasks: {},
   }
 }

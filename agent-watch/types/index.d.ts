@@ -6,6 +6,7 @@ export type WatchedAgent = {
   parentId?: string
   model?: string
   startedAt?: number
+  lastActivityAt?: number
   endedAt?: number
   endUnknown?: true
   steps: number
@@ -15,13 +16,14 @@ export type WatchedAgent = {
 
 export type TurnTiming = { turnId?: string; startedAt?: number; endedAt?: number }
 export type BackgroundSnapshot = {
-  tasks: { id: string; type: string; description: string }[]
+  tasks: { id: string; type: string; description: string; status?: 'running' | 'pending' }[]
   crons: number
 }
 
 declare module 'claude-code' {
   interface PluginState {
     'agent-watch': {
+      selected: string | null
       agents: WatchedAgent[]
       tick: number
       doneOpen: boolean
