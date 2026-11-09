@@ -24,28 +24,30 @@ Windows).
 
 Mods run in the Claude Code CLI and in the Code tab of the Claude desktop app.
 
-All three in one line (Claude Code 2.1.292 or later; macOS, Linux or WSL):
+All three in one line (Claude Code 2.1.309 or later; macOS, Linux or WSL):
 
 ```bash
-for m in agent-watch session-toolbar session-usage; do claude plugin install $m --marketplace Fuzzy-and-Fluffy/claude-code-mods || break; done
+for m in agent-watch session-toolbar session-usage; do claude plugin install $m --marketplace Fuzzy-and-Fluffy/claude-code-mods --config language=auto || break; done
 ```
 
 Windows PowerShell:
 
 ```powershell
-foreach ($m in 'agent-watch','session-toolbar','session-usage') { claude plugin install $m --marketplace Fuzzy-and-Fluffy/claude-code-mods; if ($LASTEXITCODE) { break } }
+foreach ($m in 'agent-watch','session-toolbar','session-usage') { claude plugin install $m --marketplace Fuzzy-and-Fluffy/claude-code-mods --config language=auto; if ($LASTEXITCODE) { break } }
 ```
 
 Or one at a time:
 
 ```bash
 claude plugin marketplace add Fuzzy-and-Fluffy/claude-code-mods
-claude plugin install agent-watch@wondering-mods
-claude plugin install session-toolbar@wondering-mods
-claude plugin install session-usage@wondering-mods
+claude plugin install agent-watch@wondering-mods --config language=auto
+claude plugin install session-toolbar@wondering-mods --config language=auto
+claude plugin install session-usage@wondering-mods --config language=auto
 ```
 
-Then run `/reload-plugins` in a session, or restart the app. Update later with
+`--config language=auto` stores the default language setting, so the install does not report it as
+unset; pass `--config language=zh` or `--config language=en` instead to force one. Then run
+`/reload-plugins` in a session, or restart the app. Update later with
 `claude plugin marketplace update wondering-mods` and `claude plugin update <name>@wondering-mods`.
 
 ## What they read and write
